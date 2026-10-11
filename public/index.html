@@ -386,7 +386,7 @@ input.i,select.i,textarea.i{min-height:38px;border-radius:9px}
     return {
       id: idOf(path), path,
       async get() {
-        if (path.startsWith('blob/') || !synced) { const r = await api('doc?path=' + encodeURIComponent(path)); return docSnap(path, r.exists ? { d: r.data, v: r.v } : null); }
+        if (path.startsWith('blob/') || !synced) { const r = await api('doc?p=' + encodeURIComponent(path)); return docSnap(path, r.exists ? { d: r.data, v: r.v } : null); }
         return docSnap(path, docs.get(path));
       },
       set: (data) => write('set', path, data),
@@ -2121,7 +2121,7 @@ function chatAfterRender(prevScroll) {
   if (!box) return;
   if (CHAT.stick || prevScroll == null) box.scrollTop = box.scrollHeight; else box.scrollTop = prevScroll;
   box.onscroll = () => { CHAT.stick = box.scrollHeight - box.scrollTop - box.clientHeight < 80; };
-  box.querySelectorAll('[data-lazy]').forEach(async (img) => {
+  box.querySelectorAll('img[data-lazy]').forEach(async (img) => {
     const m = messagesOf().find((x) => x.file?.fid === img.dataset.lazy);
     if (!m) return;
     try { img.src = await previewSrc(m.file); img.removeAttribute('data-lazy'); } catch { img.remove(); }
@@ -3480,6 +3480,7 @@ async function chatAction2(a, el, ev) {
     case 'chat-voice-send': return voiceStop(false);
     case 'chat-voice-cancel': return voiceStop(true);
     case 'chat-delete': return groupDeleteAsk();
+    case 'chat-voice-play': return voicePlay(el.dataset.fid);
     default: return chatAction(a, el, ev);
   }
 }
@@ -3524,7 +3525,34 @@ async function groupDelete(c) {
 const VOICE = { rec: null, stream: null, parts: [], t0: 0, timer: null, cancel: false, mime: '', chatId: null, starting: false };
 const VOICE_MAX_MS = 5 * 60000;
 const fmtSecs = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-const voiceChip = (f) => `<div class="voice-note"><audio controls preload="none" data-lazy="${esc(f.fid)}" aria-label="Voice message, ${fmtSecs(f.dur || 0)}"></audio><span class="tiny muted">${f.dur ? fmtSecs(f.dur) : ''} · voice</span></div>`;
+/* Playback uses one <audio> element that lives outside the chat list. The chat list is rebuilt on every
+   update (presence, new messages), which would destroy an in-list player mid-playback. */
+let VOICE_PLAYER = null;
+function voicePlayer() {
+  if (!VOICE_PLAYER) {
+    VOICE_PLAYER = document.createElement('audio');
+    VOICE_PLAYER.preload = 'auto';
+    for (const ev of ['play', 'pause', 'ended']) VOICE_PLAYER.addEventListener(ev, () => schedule());
+    document.body.appendChild(VOICE_PLAYER);
+  }
+  return VOICE_PLAYER;
+}
+const voicePlaying = (fid) => !!VOICE_PLAYER && VOICE_PLAYER.dataset.fid === fid && !VOICE_PLAYER.paused;
+const voiceChip = (f) => `<button type="button" class="voice-note" data-a="chat-voice-play" data-fid="${esc(f.fid)}" aria-label="${voicePlaying(f.fid) ? 'Pause' : 'Play'} voice message, ${fmtSecs(f.dur || 0)}"><span class="vp-ico" aria-hidden="true">${voicePlaying(f.fid) ? '❚❚' : '▶'}</span><span class="vp-len">${f.dur ? fmtSecs(f.dur) : ''}</span><span class="tiny muted">voice message</span></button>`;
+async function voicePlay(fid) {
+  const m = messagesOf().find((x) => x.file?.fid === fid);
+  if (!m) return toast('That voice message is no longer available.', 'warn');
+  const p = voicePlayer();
+  if (p.dataset.fid === fid) { if (p.paused) return p.play().catch((e) => voiceFail(e, p)); return p.pause(); }
+  p.pause(); p.dataset.fid = fid;
+  try { p.src = await previewSrc(m.file); await p.play(); }
+  catch (e) { voiceFail(e, p); }
+}
+function voiceFail(e, p) {
+  if (e?.name === 'AbortError') return; // a newer play/pause took over
+  console.error('Voice message playback failed:', e?.name, e?.message, 'media error code:', p?.error?.code, p?.error?.message || '');
+  toast(e?.user ? e.message : 'This voice message couldn’t be played. Try again.', 'bad');
+}
 const voiceBar = () => `<div class="voice-bar"><span class="rec-dot" aria-hidden="true"></span><b id="voice-t">${fmtSecs(Math.floor((Date.now() - VOICE.t0) / 1000))}</b><span class="tiny muted grow">Recording… (max 5 min)</span><button type="button" class="btn ghost sm" data-a="chat-voice-cancel">Cancel</button><button type="button" class="btn pri sm" data-a="chat-voice-send">Send voice</button></div>`;
 async function voiceStart() {
   if (VOICE.rec || VOICE.starting) return;
@@ -3695,8 +3723,10 @@ function cmdkRun(it) {
 .voice-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:6px 10px;margin:4px 6px 0;border-radius:10px;background:color-mix(in srgb,var(--c-coral) 10%,var(--surface));font-size:.86rem}
 .rec-dot{width:10px;height:10px;border-radius:50%;background:var(--c-coral);flex:none;animation:recpulse 1.2s ease-in-out infinite}
 @keyframes recpulse{50%{opacity:.25}}
-.voice-note{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:3px 0}
-.voice-note audio{max-width:min(300px,100%);height:36px}
+.voice-note{display:inline-flex;gap:8px;align-items:center;margin:3px 0;padding:6px 12px 6px 8px;border:1px solid var(--line);border-radius:99px;background:var(--surface);color:var(--ink);cursor:pointer;font-size:.86rem}
+.voice-note:hover{background:var(--sunk)}
+.vp-ico{width:26px;height:26px;border-radius:50%;background:var(--accent);color:var(--accent-ink);display:grid;place-items:center;font-size:.7rem;flex:none}
+.vp-len{font-variant-numeric:tabular-nums;font-weight:600}
 /* ── quick search ── */
 .modal:has(.cmdk){width:min(640px,100%);overflow:hidden}
 .cmdk-in{display:flex;gap:10px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line)}
