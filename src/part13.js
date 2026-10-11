@@ -90,11 +90,12 @@ function vChats2() {
     } else if (tab === 'pins') {
       body = `<div class="chat-files">${pins.length ? pins.slice().reverse().map((p) => `<button class="pin-row" data-a="chat-jump" data-m="${p.id}"><span class="pin-ico">📌</span><span class="grow" style="min-width:0;text-align:left"><b class="small">${esc(nameOf(p.by))}</b> <span class="tiny muted">${fmtDT(p.at)} · pinned by ${esc(nameOf(p.pinnedBy))}</span><span class="small" style="display:block">${esc(String(p.text || '').replace(/[*_~`]/g, ''))}</span></span></button>`).join('') : empty('Nothing pinned yet. Hover a message and press 📌 to keep it here.')}</div>`;
     } else if (tab === 'members') {
-      const admin = c.kind === 'group' && ((c.admins || [c.createdBy]).includes(S.me.id) || isHR());
+      const admin = isGroupAdmin(c);
       body = `<div style="padding:12px 16px;overflow:auto" class="grid">${members.slice().sort((a, b) => on.has(b) - on.has(a)).map((id) => `<div class="row" style="justify-content:space-between"><span class="row" style="gap:6px">${person(id, empById(id)?.designation || '')}${on.has(id) ? '<span class="pill t-ok">Online</span>' : ''}</span><span class="row" style="gap:6px">${c.kind === 'group' && (c.admins || [c.createdBy]).includes(id) ? '<span class="pill t-acc">Group admin</span>' : ''}${id !== S.me.id ? `<button class="btn sm" data-a="dm" data-id="${id}">Message</button>` : ''}${admin && id !== S.me.id ? `<button class="btn sm ghost" data-a="chat-remove" data-id="${id}">Remove</button>` : ''}</span></div>`).join('')}
         ${admin ? `<form data-f="chat-add" class="row" style="flex-wrap:nowrap;margin-top:8px"><select class="i" id="ch-add" name="emp">${peopleGroups('', { blank: 'Add someone…', exclude: members })}</select><button class="btn">Add</button></form>
           <form data-f="chat-rename" class="row" style="flex-wrap:nowrap"><input class="i" id="ch-ren" name="name" value="${esc(c.name)}"><button class="btn">Rename</button></form>` : ''}
         ${c.kind === 'dept' ? '<p class="tiny muted">Members follow the department on the People page.</p>' : ''}
+        ${admin ? '<button class="btn danger" data-a="chat-delete">Delete group</button>' : ''}
         ${c.kind === 'group' ? `<button class="btn danger" data-a="chat-leave">Leave group</button>` : ''}</div>`;
     } else {
       const tagQ = fq.startsWith('#') ? fq.slice(1) : null;
@@ -116,7 +117,7 @@ function vChats2() {
           <div class="msg-av">${cont ? `<span class="msg-t">${hm(m.at)}</span>` : `<span class="av-wrap">${avatar(nameOf(m.by))}${onlineDot(m.by, on)}</span>`}</div>
           <div class="msg-body">
             ${cont ? '' : `<div class="msg-h"><b>${esc(nameOf(m.by))}</b>${mine ? '<span class="you">you</span>' : ''}<span class="tiny muted">${esc(empById(m.by)?.designation || '')}</span><span class="tiny muted">${hm(m.at)}</span>${pinned.has(m.id) ? '<span class="tiny">📌</span>' : ''}</div>`}
-            ${m.deleted ? '<i class="muted small">Message deleted</i>' : `${m.reply ? `<button class="quote" data-a="chat-jump" data-m="${m.reply.id}"><b class="tiny">${esc(nameOf(m.reply.by))}</b><span class="tiny trunc" style="display:block">${esc(m.reply.text)}</span></button>` : ''}${m.file ? fileChip(m.file, m.id) : ''}${m.text ? `<div class="btext">${fmtMsg(m)}${m.edited ? ' <span class="tiny muted">(edited)</span>' : ''}</div>` : ''}`}
+            ${m.deleted ? '<i class="muted small">Message deleted</i>' : `${m.reply ? `<button class="quote" data-a="chat-jump" data-m="${m.reply.id}"><b class="tiny">${esc(nameOf(m.reply.by))}</b><span class="tiny trunc" style="display:block">${esc(m.reply.text)}</span></button>` : ''}${m.file ? (m.file.voice ? voiceChip(m.file) : fileChip(m.file, m.id)) : ''}${m.text ? `<div class="btext">${fmtMsg(m)}${m.edited ? ' <span class="tiny muted">(edited)</span>' : ''}</div>` : ''}`}
             ${Object.keys(rxBy).length ? `<div class="rxs">${Object.entries(rxBy).map(([e, bys]) => `<button class="rxp ${bys.includes(S.me.id) ? 'on' : ''}" data-a="chat-react" data-m="${m.id}" data-e="${e}" title="${esc(bys.map(nameOf).join(', '))}">${e} <b>${bys.length}</b></button>`).join('')}<button class="rxp add" data-a="chat-pick" data-m="${m.id}" aria-label="Add reaction">+</button></div>` : ''}
             ${CH2.picker === m.id ? `<div class="rx-picker">${EMOJI.map((e) => `<button data-a="chat-react" data-m="${m.id}" data-e="${e}">${e}</button>`).join('')}</div>` : ''}
           </div>
@@ -140,8 +141,9 @@ function vChats2() {
         ${CHAT.replyTo ? `<div class="quote row" style="justify-content:space-between;flex-wrap:nowrap"><span class="trunc tiny">Replying to <b>${esc(nameOf(CHAT.replyTo.by))}</b>: ${esc(CHAT.replyTo.text || CHAT.replyTo.file?.name || '')}</span><button type="button" class="btn ghost sm" data-a="chat-unreply">✕</button></div>` : ''}
         ${CHAT.uploading ? `<div class="tiny muted">Uploading ${esc(CHAT.uploading)}…</div>` : ''}
         <div class="comp-box"><div id="men-pop" class="men-pop" ${CH2.pop ? '' : 'hidden'}>${menPopHtml()}</div>
+          ${VOICE.rec ? voiceBar() : ''}
           <textarea class="i" id="ch-text" name="text" rows="1" placeholder="Message ${esc(c.kind === 'dm' ? c.title : '#' + c.title)} · @ to tag someone · # to tag a topic">${ed ? esc(ed.text) : ''}</textarea>
-          <div class="comp-bar"><span class="row" style="gap:2px"><label class="cbtn" title="Share a document (PDF, Excel, Word, PowerPoint, images, CSV, ZIP)">📎<input type="file" id="ch-file" data-c="chatFile" hidden></label><button type="button" class="cbtn" data-a="chat-at" title="Tag someone">@</button><button type="button" class="cbtn" data-a="chat-hash" title="Add a topic tag">#</button><button type="button" class="cbtn" data-a="chat-emo" title="Emoji">😊</button><button type="button" class="cbtn" data-a="chat-fmt" data-w="*" title="Bold"><b>B</b></button><button type="button" class="cbtn" data-a="chat-fmt" data-w="_" title="Italic"><i>I</i></button></span>
+          <div class="comp-bar"><span class="row" style="gap:2px"><label class="cbtn" title="Share a document (PDF, Excel, Word, PowerPoint, images, CSV, ZIP)">📎<input type="file" id="ch-file" data-c="chatFile" hidden></label>${VOICE.rec ? '' : '<button type="button" class="cbtn" data-a="chat-voice" title="Record a voice message" aria-label="Record a voice message">🎤</button>'}<button type="button" class="cbtn" data-a="chat-at" title="Tag someone">@</button><button type="button" class="cbtn" data-a="chat-hash" title="Add a topic tag">#</button><button type="button" class="cbtn" data-a="chat-emo" title="Emoji">😊</button><button type="button" class="cbtn" data-a="chat-fmt" data-w="*" title="Bold"><b>B</b></button><button type="button" class="cbtn" data-a="chat-fmt" data-w="_" title="Italic"><i>I</i></button></span>
             <span class="row" style="gap:8px"><span class="tiny muted hide-sm">Shift+Enter for a new line</span><button class="btn pri sm" type="submit">${ed ? 'Save' : 'Send'}</button></span></div>
           ${CH2.emo ? `<div class="emo-pop">${EMOJI.map((e) => `<button type="button" data-a="chat-ins" data-t="${e}">${e}</button>`).join('')}</div>` : ''}</div></form>` : ''}
     </section>`;
@@ -216,7 +218,7 @@ async function chatAction2(a, el, ev) {
   const msg = () => messagesOf().find((m) => m.id === el.dataset.m);
   const c = () => myChats().find((x) => x.id === CHAT.openId);
   switch (a) {
-    case 'chat-open': CH2.picker = null; CH2.emo = false; CHAT.replyTo = null; CH2.editing = null; S.ui.chat = el.dataset.id; S.ui.chTab = 'msgs'; S.ui.chFind = ''; CHAT.stick = true; viewChanged = false; schedule(); setTimeout(() => document.getElementById('ch-text')?.focus(), 60); return;
+    case 'chat-open': voiceStop(true); CH2.picker = null; CH2.emo = false; CHAT.replyTo = null; CH2.editing = null; S.ui.chat = el.dataset.id; S.ui.chTab = 'msgs'; S.ui.chFind = ''; CHAT.stick = true; viewChanged = false; schedule(); setTimeout(() => document.getElementById('ch-text')?.focus(), 60); return;
     case 'chat-men-pick': return menPick(+el.dataset.i);
     case 'chat-at': case 'chat-hash': { const ta = $('#ch-text'); if (!ta) return; const s = ta.selectionStart, pre = s && !/\s/.test(ta.value[s - 1]) ? ' ' : ''; insertAtCaret(pre + (a === 'chat-at' ? '@' : '#')); menUpdate(ta); return; }
     case 'chat-emo': CH2.emo = !CH2.emo; return schedule();
@@ -236,6 +238,10 @@ async function chatAction2(a, el, ev) {
     case 'chat-jump': { S.ui.chTab = 'msgs'; S.ui.chFind = ''; CHAT.stick = false; schedule(); setTimeout(() => { const n = document.getElementById('m-' + el.dataset.m); if (n) { n.scrollIntoView({ block: 'center' }); n.classList.add('flash'); setTimeout(() => n.classList.remove('flash'), 1600); } else toast('That message is older than this view shows.', 'warn'); }, 80); return; }
     case 'chat-ment': { const n = S.ntf.find((x) => x.id === el.dataset.id); if (!n) return; if (!n.read) act(() => patch(`ntf/${n.id}`, { read: true })); S.ui.chat = n.go.chat; S.ui.chTab = 'msgs'; S.ui.chFind = ''; schedule(); if (n.go.msg) setTimeout(() => chatAction2('chat-jump', { dataset: { m: n.go.msg } }), 400); return; }
     case 'chat-ment-read': return act(async () => { for (const n of S.ntf.filter((x) => x.go?.chat && /mentioned you|replied to you/.test(x.title) && !x.read)) await patch(`ntf/${n.id}`, { read: true }); }, 'All marked read');
+    case 'chat-voice': return voiceStart();
+    case 'chat-voice-send': return voiceStop(false);
+    case 'chat-voice-cancel': return voiceStop(true);
+    case 'chat-delete': return groupDeleteAsk();
     default: return chatAction(a, el, ev);
   }
 }
@@ -254,6 +260,82 @@ async function chatSubmit2(f, form, fd) {
   }
   const ok = await act(() => sendMessage(text));
   if (!ok && ta) ta.value = text;
+}
+
+/* ── group admin: the person who creates a group can rename it, change members and delete it ── */
+const isGroupAdmin = (c) => !!c && c.kind === 'group' && (c.admins || [c.createdBy]).includes(S.me.id);
+function groupDeleteAsk() {
+  const c = myChats().find((x) => x.id === CHAT.openId);
+  if (!isGroupAdmin(c)) return toast('Only the group admin can delete this group.', 'warn');
+  return confirmBox(`Delete “${c.name}”?`, 'The group, its messages and shared files are removed for everyone. This can’t be undone.', () => groupDelete(c));
+}
+async function groupDelete(c) {
+  await act(async () => {
+    // Files and messages go first: the server only lets the admin delete them while the group still exists.
+    const snap = await S.db.collection(`chat/${c.id}/b`).get();
+    for (const b of docsOf(snap)) {
+      for (const m of b.msgs || []) if (m.file?.fid) for (let i = 0; i < (m.file.chunks || 0); i++) await docRef(`blob/${m.file.fid}_${i}`).delete();
+      await docRef(`chat/${c.id}/b/${b.id}`).delete();
+    }
+    await docRef(`chat/${c.id}`).delete();
+    S.ui.chat = null; CHAT.openId = null; CHAT.unsub?.(); CHAT.unsub = null;
+  }, 'Group deleted');
+}
+
+/* ── voice messages: recorded in the browser, sent as a chunked audio file, played inline ── */
+const VOICE = { rec: null, stream: null, parts: [], t0: 0, timer: null, cancel: false, mime: '', chatId: null, starting: false };
+const VOICE_MAX_MS = 5 * 60000;
+const fmtSecs = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+const voiceChip = (f) => `<div class="voice-note"><audio controls preload="none" data-lazy="${esc(f.fid)}" aria-label="Voice message, ${fmtSecs(f.dur || 0)}"></audio><span class="tiny muted">${f.dur ? fmtSecs(f.dur) : ''} · voice</span></div>`;
+const voiceBar = () => `<div class="voice-bar"><span class="rec-dot" aria-hidden="true"></span><b id="voice-t">${fmtSecs(Math.floor((Date.now() - VOICE.t0) / 1000))}</b><span class="tiny muted grow">Recording… (max 5 min)</span><button type="button" class="btn ghost sm" data-a="chat-voice-cancel">Cancel</button><button type="button" class="btn pri sm" data-a="chat-voice-send">Send voice</button></div>`;
+async function voiceStart() {
+  if (VOICE.rec || VOICE.starting) return;
+  if (!CHAT.openId) return toast('Open a chat first.', 'warn');
+  if (!window.MediaRecorder || !navigator.mediaDevices?.getUserMedia) return toast('Voice messages aren’t supported in this browser.', 'warn');
+  VOICE.starting = true;
+  try {
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch { return toast('Allow microphone access to send a voice message.', 'warn'); }
+    const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'].find((t) => MediaRecorder.isTypeSupported(t)) || '';
+    const rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+    Object.assign(VOICE, { rec, stream, parts: [], t0: Date.now(), cancel: false, mime: rec.mimeType || type || 'audio/webm', chatId: CHAT.openId });
+    rec.ondataavailable = (e) => { if (e.data?.size) VOICE.parts.push(e.data); };
+    rec.onstop = voiceFinish;
+    rec.start(1000);
+    VOICE.timer = setInterval(() => {
+      const el = document.getElementById('voice-t');
+      if (el) el.textContent = fmtSecs(Math.floor((Date.now() - VOICE.t0) / 1000));
+      if (Date.now() - VOICE.t0 >= VOICE_MAX_MS) voiceStop(false);
+    }, 500);
+    schedule();
+  } finally { VOICE.starting = false; }
+}
+function voiceStop(cancel) {
+  if (!VOICE.rec) return;
+  VOICE.cancel = cancel;
+  if (VOICE.rec.state !== 'inactive') VOICE.rec.stop();
+}
+async function voiceFinish() {
+  const { parts, mime, cancel, chatId, t0, stream, timer } = VOICE;
+  clearInterval(timer);
+  stream?.getTracks().forEach((t) => t.stop());
+  Object.assign(VOICE, { rec: null, stream: null, parts: [], timer: null });
+  const secs = Math.max(1, Math.round((Date.now() - t0) / 1000));
+  schedule();
+  if (cancel) return;
+  if (CHAT.openId !== chatId) return toast('Voice message discarded — you switched chats.', 'warn');
+  const blob = new Blob(parts, { type: mime });
+  if (!blob.size) return toast('Nothing was recorded.', 'warn');
+  if (blob.size > MAX_CHUNKED) return toast('That voice message is too long to send. Try a shorter one.', 'warn');
+  const ext = mime.includes('mp4') ? 'm4a' : mime.includes('ogg') ? 'ogg' : 'webm';
+  await act(async () => {
+    try {
+      const { fid, chunks } = await putChunked(new Uint8Array(await blob.arrayBuffer()), 'Voice message');
+      CHAT.stick = true;
+      await sendMessage('', { name: 'Voice message', size: blob.size, ext, mime, fid, chunks, voice: true, dur: secs });
+    } finally { CHAT.uploading = null; schedule(); }
+  });
 }
 
 /* ── quick search / command palette (Ctrl/⌘ K) ── */
@@ -363,6 +445,11 @@ function cmdkRun(it) {
 .men-it{display:flex;gap:10px;align-items:center;width:100%;border:0;background:none;border-radius:8px;padding:6px 8px;cursor:pointer;color:var(--ink);text-align:left}
 .men-it.on,.men-it:hover{background:color-mix(in srgb,var(--c-sky) 13%,var(--surface))}
 .emo-pop{position:absolute;bottom:44px;left:6px;z-index:5}
+.voice-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:6px 10px;margin:4px 6px 0;border-radius:10px;background:color-mix(in srgb,var(--c-coral) 10%,var(--surface));font-size:.86rem}
+.rec-dot{width:10px;height:10px;border-radius:50%;background:var(--c-coral);flex:none;animation:recpulse 1.2s ease-in-out infinite}
+@keyframes recpulse{50%{opacity:.25}}
+.voice-note{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:3px 0}
+.voice-note audio{max-width:min(300px,100%);height:36px}
 /* ── quick search ── */
 .modal:has(.cmdk){width:min(640px,100%);overflow:hidden}
 .cmdk-in{display:flex;gap:10px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line)}

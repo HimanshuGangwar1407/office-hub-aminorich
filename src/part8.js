@@ -125,14 +125,18 @@ async function uploadFile(file) {
   }
   if (!CHUNK_TYPES.includes(ext)) fail(`.${ext || 'this'} files can’t be shared here. Supported: PDF, Excel (.xlsx), Word (.docx), PowerPoint (.pptx), images, CSV, text and ZIP.`);
   if (file.size > MAX_CHUNKED) fail(`${ext.toUpperCase()} files up to 6 MB can be shared. For bigger ones, share a Drive / OneDrive link.`);
-  const buf = new Uint8Array(await file.arrayBuffer());
+  const { fid, chunks } = await putChunked(new Uint8Array(await file.arrayBuffer()), file.name);
+  return { name: file.name, size: file.size, ext, fid, chunks };
+}
+/* Splits bytes into base64 chunk documents under blob/ and returns the file id and chunk count. */
+async function putChunked(buf, label) {
   let bin = ''; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
   const b64 = btoa(bin), fid = newId(), n = Math.ceil(b64.length / CHUNK);
   for (let i = 0; i < n; i++) {
-    CHAT.uploading = `${file.name} — ${Math.round((i / n) * 100)}%`; schedule();
+    CHAT.uploading = `${label} — ${Math.round((i / n) * 100)}%`; schedule();
     await put(`blob/${fid}_${i}`, { fid, i, n, by: S.me.id, data: b64.slice(i * CHUNK, (i + 1) * CHUNK) });
   }
-  return { name: file.name, size: file.size, ext, fid, chunks: n };
+  return { fid, chunks: n };
 }
 async function fileBlob(f) {
   if (f.asset) { const r = await fetch('/_blob/' + f.asset); if (!r.ok) fail('That file is no longer available.'); return r.blob(); }
@@ -140,7 +144,7 @@ async function fileBlob(f) {
   for (let i = 0; i < f.chunks; i++) { const s = await docRef(`blob/${f.fid}_${i}`).get(); if (!s.exists) fail('That file is no longer available.'); b64 += s.data().data; }
   const bin = atob(b64), arr = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-  return new Blob([arr], { type: ASSET_TYPES[f.ext] || 'application/octet-stream' });
+  return new Blob([arr], { type: f.mime || ASSET_TYPES[f.ext] || 'application/octet-stream' });
 }
 async function saveFile(f) {
   if (!S.dl) fail('Downloads aren’t available in this view.');
@@ -227,7 +231,7 @@ function chatAfterRender(prevScroll) {
   if (!box) return;
   if (CHAT.stick || prevScroll == null) box.scrollTop = box.scrollHeight; else box.scrollTop = prevScroll;
   box.onscroll = () => { CHAT.stick = box.scrollHeight - box.scrollTop - box.clientHeight < 80; };
-  box.querySelectorAll('img[data-lazy]').forEach(async (img) => {
+  box.querySelectorAll('[data-lazy]').forEach(async (img) => {
     const m = messagesOf().find((x) => x.file?.fid === img.dataset.lazy);
     if (!m) return;
     try { img.src = await previewSrc(m.file); img.removeAttribute('data-lazy'); } catch { img.remove(); }
@@ -257,7 +261,7 @@ async function chatAction(a, el) {
     case 'chat-file': return act(() => saveFile(msg().file));
     case 'chat-open-file': { const m = msg(); if (!m) return; const src = await previewSrc(m.file).catch(() => null); if (src) openModal(() => `${mhead(esc(m.file.name), `${esc(nameOf(m.by))} · ${fmtDT(m.at)}`)}<div class="body"><img src="${esc(src)}" alt="${esc(m.file.name)}" style="width:100%;border-radius:8px"></div><footer><button class="btn" data-a="close">Close</button></footer>`); return; }
     case 'chat-task': { const m = msg(); S.ui.preAssignee = null; openModal(() => taskForm()); setTimeout(() => { const t = $('#tf-title'), d = $('#tf-desc'); if (t) t.value = m.text.split('\n')[0].slice(0, 120); if (d) d.value = `From chat “${chatTitle(myChats().find((c) => c.id === CHAT.openId) || {})}” — ${nameOf(m.by)}, ${fmtDT(m.at)}:\n${m.text}`; }, 50); return; }
-    case 'chat-leave': return confirmBox('Leave this group?', 'You’ll stop seeing its messages.', async () => { const c = CHAT.list.find((x) => x.id === CHAT.openId); await patch(`chat/${c.id}`, { members: (c.members || []).filter((m) => m !== S.me.id) }); await appendMine(c.id, { id: newId(), at: Date.now(), text: `${S.me.name} left the group` }); S.ui.chat = null; });
+    case 'chat-leave': return confirmBox('Leave this group?', 'You’ll stop seeing its messages.', async () => { const c = CHAT.list.find((x) => x.id === CHAT.openId); await appendMine(c.id, { id: newId(), at: Date.now(), text: `${S.me.name} left the group` }); await patch(`chat/${c.id}`, { members: (c.members || []).filter((m) => m !== S.me.id) }); S.ui.chat = null; });
     case 'chat-remove': { const c = CHAT.list.find((x) => x.id === CHAT.openId), who = el.dataset.id; return confirmBox(`Remove ${nameOf(who)}?`, 'They’ll stop seeing this group.', async () => { await patch(`chat/${c.id}`, { members: (c.members || []).filter((m) => m !== who) }); await appendMine(c.id, { id: newId(), at: Date.now(), text: `${S.me.name} removed ${nameOf(who)}` }); }); }
   }
 }
