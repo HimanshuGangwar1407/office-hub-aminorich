@@ -1,0 +1,5 @@
+{
+  "files.exclude": { "node_modules": true },
+  "search.exclude": { "public/index.html": true },
+  "files.readonlyInclude": { "public/index.html": true }
+}

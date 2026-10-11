@@ -1,0 +1,9 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.vercel/
+.check.cjs
+# never commit exported office data (salaries, personal details)
+officehub-data*.json
+*.export.json

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OfficeHub setup</title><link rel="icon" href="/icon.svg">
+<style>
+:root{--bg:#f3f5f2;--card:#fff;--ink:#17221d;--muted:#5d6b64;--line:#d8dfd9;--acc:#0d6b57;--bad:#b3261e;--ok:#1d7a3a}
+@media (prefers-color-scheme:dark){:root{--bg:#101613;--card:#18211d;--ink:#e6ece8;--muted:#9aa8a0;--line:#2b3631;--acc:#4fc3a1}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:24px 16px}
+main{max-width:640px;margin:0 auto;display:grid;gap:16px}h1{margin:0 0 4px;font-size:24px}h2{margin:0 0 8px;font-size:17px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;display:grid;gap:10px}
+label{display:grid;gap:4px;font-weight:500;font-size:14px}input{font:inherit;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--ink)}
+.check{display:flex;gap:8px;align-items:center;font-weight:400}button{font:inherit;font-weight:600;padding:10px 16px;border:0;border-radius:9px;background:var(--acc);color:#fff;cursor:pointer;justify-self:start}
+button:disabled{opacity:.6}.muted{color:var(--muted)}.msg{padding:10px 12px;border-radius:9px;display:none}.msg.bad{display:block;background:color-mix(in srgb,var(--bad) 14%,transparent);color:var(--bad)}.msg.ok{display:block;background:color-mix(in srgb,var(--ok) 14%,transparent);color:var(--ok)}
+a{color:var(--acc)}
+</style></head><body><main>
+<div><h1>OfficeHub setup</h1><p class="muted">One-time steps for the administrator. You need the <b>SETUP_KEY</b> you added in Vercel → Settings → Environment Variables.</p></div>
+<form class="card" id="imp"><h2>A. Import your existing data</h2>
+  <p class="muted" style="margin:0">Choose <b>officehub-data.json</b> (the export of your Claude version: employees, attendance, leave, tasks, approvals, chats, claims, salaries). After importing, every person — you included — opens the main page and uses <b>Create your account</b> with their employee code + work email.</p>
+  <label>Setup key<input type="password" name="key" required autocomplete="off"></label>
+  <label>Data file<input type="file" name="file" accept=".json,application/json" required></label>
+  <label class="check"><input type="checkbox" name="replace"> Replace existing data (deletes everything already in the database, including accounts)</label>
+  <div class="msg" id="imp-msg"></div><button>Import</button></form>
+<form class="card" id="own"><h2>B. Or start empty</h2>
+  <p class="muted" style="margin:0">Creates the first administrator login. You’ll then set up the company, departments and employees inside the app.</p>
+  <label>Setup key<input type="password" name="key" required autocomplete="off"></label>
+  <label>Your work email<input type="email" name="email" required></label>
+  <label>Password<input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
+  <div class="msg" id="own-msg"></div><button>Create administrator</button></form>
+<p class="muted">Done? <a href="/">Open OfficeHub</a></p>
+</main>
+<script>
+const post = async (path, body) => { const r = await fetch('/api/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.message || 'Failed (' + r.status + ')'); return j; };
+const say = (id, cls, text) => { const m = document.getElementById(id); m.className = 'msg ' + cls; m.textContent = text; };
+document.getElementById('imp').addEventListener('submit', async (ev) => {
+  ev.preventDefault(); const f = ev.target, b = f.querySelector('button'); b.disabled = true; say('imp-msg', 'ok', 'Importing…');
+  try {
+    const json = JSON.parse(await f.file.files[0].text());
+    if (json.format !== 'officehub-export-1' || !json.docs) throw new Error('That file isn’t an OfficeHub export.');
+    const r = await post('setup/import', { key: f.key.value, docs: json.docs, replace: f.replace.checked });
+    say('imp-msg', 'ok', `Imported ${r.imported} records. Now open OfficeHub and choose “Create your account”.`);
+  } catch (e) { say('imp-msg', 'bad', e.message); } finally { b.disabled = false; }
+});
+document.getElementById('own').addEventListener('submit', async (ev) => {
+  ev.preventDefault(); const f = ev.target, b = f.querySelector('button'); b.disabled = true;
+  try { await post('setup/owner', { key: f.key.value, email: f.email.value, password: f.password.value }); location.href = '/'; }
+  catch (e) { say('own-msg', 'bad', e.message); b.disabled = false; }
+});
+</script></body></html>

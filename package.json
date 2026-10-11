@@ -1,0 +1,18 @@
+{
+  "name": "officehub",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "OfficeHub — office management for Aminorich Nutrients (attendance, leave, tasks, approvals, chat, claims, salary)",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "node scripts/build.mjs && node scripts/dev-server.mjs",
+    "check": "node scripts/build.mjs --check",
+    "rebuild": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "pg": "8.23.0"
+  }
+}

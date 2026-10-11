@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run OfficeHub (http://localhost:3000)",
+      "type": "node",
+      "request": "launch",
+      "runtimeArgs": ["--env-file=.env"],
+      "program": "${workspaceFolder}/scripts/dev-server.mjs",
+      "preLaunchTask": "Build page",
+      "console": "integratedTerminal"
+    }
+  ]
+}
