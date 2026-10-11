@@ -231,7 +231,7 @@ function chatAfterRender(prevScroll) {
   if (!box) return;
   if (CHAT.stick || prevScroll == null) box.scrollTop = box.scrollHeight; else box.scrollTop = prevScroll;
   box.onscroll = () => { CHAT.stick = box.scrollHeight - box.scrollTop - box.clientHeight < 80; };
-  box.querySelectorAll('[data-lazy]').forEach(async (img) => {
+  box.querySelectorAll('img[data-lazy]').forEach(async (img) => {
     const m = messagesOf().find((x) => x.file?.fid === img.dataset.lazy);
     if (!m) return;
     try { img.src = await previewSrc(m.file); img.removeAttribute('data-lazy'); } catch { img.remove(); }

@@ -189,7 +189,8 @@ const routes = {
   },
   'GET doc': async (req) => {
     const s = await needSession(req);
-    const path = String(req.query.path || '');
+    // Not "path": on Vercel the /api/* rewrite already sets path=doc, so a second path= becomes ambiguous.
+    const path = String(req.query.p || '');
     if (!isDocPath(path)) fail(400, 'invalid_argument', 'Bad path.');
     if (!canRead(path, s)) return { exists: false };
     const d = await getDoc(path);
