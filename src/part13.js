@@ -296,7 +296,7 @@ async function voiceStart() {
   try {
     let stream;
     try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-    catch { return toast('Allow microphone access to send a voice message.', 'warn'); }
+    catch (e) { console.error('Voice message: microphone error', e?.name, e?.message); return toast(micErrorText(e), 'warn'); }
     const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'].find((t) => MediaRecorder.isTypeSupported(t)) || '';
     const rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
     Object.assign(VOICE, { rec, stream, parts: [], t0: Date.now(), cancel: false, mime: rec.mimeType || type || 'audio/webm', chatId: CHAT.openId });
@@ -310,6 +310,15 @@ async function voiceStart() {
     }, 500);
     schedule();
   } finally { VOICE.starting = false; }
+}
+/* The message names the real cause, so a blocked site policy, a blocked browser permission, and a missing or busy device are told apart. */
+function micErrorText(e) {
+  const msg = String(e?.message || '');
+  if (e?.name === 'NotAllowedError' && /polic/i.test(msg)) return 'This site’s security settings block the microphone. Ask the admin to check the app’s Permissions-Policy.';
+  if (e?.name === 'NotAllowedError' || e?.name === 'SecurityError') return 'The browser is blocking the microphone. Click the lock icon in the address bar, set Microphone to Allow, then reload.';
+  if (e?.name === 'NotFoundError' || e?.name === 'OverconstrainedError') return 'No microphone was found on this device.';
+  if (e?.name === 'NotReadableError' || e?.name === 'AbortError') return 'The microphone is in use by another app. Close it and try again.';
+  return `Couldn’t start the microphone (${e?.name || 'unknown error'}).`;
 }
 function voiceStop(cancel) {
   if (!VOICE.rec) return;
