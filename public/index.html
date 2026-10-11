@@ -3352,10 +3352,10 @@ function vChats2() {
         const rxBy = Object.entries(m.reacts || {}).filter(([, e]) => e).reduce((a, [by, e]) => ((a[e] = a[e] || []).push(by), a), {});
         const sys = !m.file && /^(.+) (added|removed|left)( |$)/.test(m.text || '') && (m.text || '').startsWith(nameOf(m.by));
         if (sys) return `${sep}${nw}<div class="msg-sys">${esc(m.text)} · ${hm(m.at)}</div>`;
-        return `${sep}${nw}<div class="msg ${cont ? 'cont' : ''} ${meTagged ? 'hl' : ''} ${pinned.has(m.id) ? 'pinned' : ''}" id="m-${m.id}">
+        return `${sep}${nw}<div class="msg ${mine ? 'mine' : 'theirs'} ${cont ? 'cont' : ''} ${meTagged ? 'hl' : ''} ${pinned.has(m.id) ? 'pinned' : ''}" id="m-${m.id}">
           <div class="msg-av">${cont ? `<span class="msg-t">${hm(m.at)}</span>` : `<span class="av-wrap">${avatar(nameOf(m.by))}${onlineDot(m.by, on)}</span>`}</div>
-          <div class="msg-body">
-            ${cont ? '' : `<div class="msg-h"><b>${esc(nameOf(m.by))}</b>${mine ? '<span class="you">you</span>' : ''}<span class="tiny muted">${esc(empById(m.by)?.designation || '')}</span><span class="tiny muted">${hm(m.at)}</span>${pinned.has(m.id) ? '<span class="tiny">📌</span>' : ''}</div>`}
+          <div class="msg-body" title="${esc(fmtDT(m.at))}">
+            ${cont ? '' : `<div class="msg-h"><b>${esc(nameOf(m.by))}</b>${mine ? '<span class="you">you</span>' : ''}<span class="msg-des tiny muted">${esc(empById(m.by)?.designation || '')}</span><span class="msg-time tiny muted">${hm(m.at)}</span>${pinned.has(m.id) ? '<span class="tiny">📌</span>' : ''}</div>`}
             ${m.deleted ? '<i class="muted small">Message deleted</i>' : `${m.reply ? `<button class="quote" data-a="chat-jump" data-m="${m.reply.id}"><b class="tiny">${esc(nameOf(m.reply.by))}</b><span class="tiny trunc" style="display:block">${esc(m.reply.text)}</span></button>` : ''}${m.file ? (m.file.voice ? voiceChip(m.file) : fileChip(m.file, m.id)) : ''}${m.text ? `<div class="btext">${fmtMsg(m)}${m.edited ? ' <span class="tiny muted">(edited)</span>' : ''}</div>` : ''}`}
             ${Object.keys(rxBy).length ? `<div class="rxs">${Object.entries(rxBy).map(([e, bys]) => `<button class="rxp ${bys.includes(S.me.id) ? 'on' : ''}" data-a="chat-react" data-m="${m.id}" data-e="${e}" title="${esc(bys.map(nameOf).join(', '))}">${e} <b>${bys.length}</b></button>`).join('')}<button class="rxp add" data-a="chat-pick" data-m="${m.id}" aria-label="Add reaction">+</button></div>` : ''}
             ${CH2.picker === m.id ? `<div class="rx-picker">${EMOJI.map((e) => `<button data-a="chat-react" data-m="${m.id}" data-e="${e}">${e}</button>`).join('')}</div>` : ''}
@@ -3697,6 +3697,23 @@ function cmdkRun(it) {
 .msg-tools button{border:0;background:none;border-radius:6px;padding:3px 6px;cursor:pointer;font-size:.9rem;color:var(--ink)}
 .msg-tools button:hover{background:var(--sunk)}
 @media (hover:none){.msg-tools{position:static;display:flex;box-shadow:none;border:0;grid-column:2;justify-self:start;margin-top:2px;padding:0}}
+/* Bubbles: my messages on the right in blue, everyone else's on the left in white (same rows for DMs, groups and departments). */
+.msg-body{min-width:0;width:fit-content;max-width:min(600px,100%);border-radius:14px;padding:6px 12px 5px;box-shadow:0 1px 1px rgba(0,0,0,.06)}
+.msg.theirs .msg-body{justify-self:start;background:#ffffff;color:#1f2328;border:1px solid #e1e5ea;border-top-left-radius:4px}
+.msg.theirs .btext code{background:#f3f5f8}
+.msg.mine{grid-template-columns:minmax(0,1fr)}
+.msg.mine .msg-av{display:none}
+.msg.mine .msg-body{justify-self:end;background:#0b6bcb;color:#ffffff;border-top-right-radius:4px}
+.msg.mine .msg-h b,.msg.mine .msg-h .you,.msg.mine .msg-h .msg-des{display:none}
+.msg.mine .msg-time{color:rgba(255,255,255,.92)}
+.msg.mine .msg-body .muted,.msg.mine .msg-body .tiny{color:rgba(255,255,255,.92)}
+.msg.mine .you{background:rgba(255,255,255,.22);color:#ffffff}
+.msg.mine .btext a{color:#ffffff;text-decoration:underline}
+.msg.mine .btext code{background:rgba(255,255,255,.18);border-color:rgba(255,255,255,.35);color:#ffffff}
+.msg.mine .men,.msg.mine .men.me{background:rgba(255,255,255,.24);color:#ffffff}
+.msg.mine .htag{color:#ffffff}
+.msg.mine .msg-body .quote{background:rgba(255,255,255,.14);border-left-color:#ffffff;color:#ffffff}
+.msg.mine .msg-tools{grid-column:1;justify-self:end}
 .rxs{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
 .rxp{border:1px solid var(--line);background:var(--surface);border-radius:99px;padding:0 8px;font-size:.8rem;cursor:pointer;line-height:1.7}
 .rxp.on{border-color:var(--c-sky);background:color-mix(in srgb,var(--c-sky) 14%,var(--surface))}
