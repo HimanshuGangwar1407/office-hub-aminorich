@@ -1,6 +1,7 @@
 // All OfficeHub API routes. Used by api/main.js on Vercel and by scripts/dev-server.mjs locally.
 import { q, getPool, ensureSchema, writeDoc, getDoc, parentOf } from './db.js';
 import { sessionFrom, hashPassword, checkPassword, passwordProblem, newUid, makeToken, cookieHeader, safeEqual } from './auth.js';
+import { chatWriteProblem } from './chat-rules.js';
 
 const SALARY = new Set(['pay', 'payroll', 'fines']);
 const PROTECTED_EMP = ['role', 'userId', 'active', 'status', 'code', 'email'];
@@ -202,6 +203,10 @@ const routes = {
     if (op !== 'delete' && JSON.stringify(data).length > MAX_DOC) fail(413, 'too_large', 'That record is too large.');
     const old = (await getDoc(path))?.data || null;
     checkWrite(op, path, data, old, s);
+    const parts = path.split('/');
+    const parent = parts[0] === 'chat' && parts.length === 4 ? (await getDoc(`chat/${parts[1]}`))?.data || null : null;
+    const chatBad = chatWriteProblem(op, path, data, old, s, parent);
+    if (chatBad) fail(403, 'permission_denied', chatBad);
     const v = await writeDoc(getPool(), op, path, op === 'delete' ? null : data);
     if (op !== 'delete') await mailIfQueued(path, op === 'update' ? { ...(old || {}), ...data } : data);
     return { v };
