@@ -86,7 +86,7 @@ function vChats2() {
     let body = '';
     if (tab === 'files') {
       const files = msgs.filter((m) => m.file && !m.deleted).reverse();
-      body = files.length ? `<div class="chat-files">${files.map((m) => `<div class="chat-frow">${fileChip(m.file, m.id)}<div class="tiny muted">${esc(nameOf(m.by))} · ${fmtDT(m.at)}${m.text ? ` · ${esc(m.text.slice(0, 80))}` : ''}</div></div>`).join('')}</div>` : empty('No documents shared in this chat yet. Use the paperclip to share one.');
+      body = files.length ? `<div class="chat-files">${files.map((m) => `<div class="chat-frow">${m.file.voice ? voiceChip(m.file) : fileChip(m.file, m.id)}<div class="tiny muted">${esc(nameOf(m.by))} · ${fmtDT(m.at)}${m.text ? ` · ${esc(m.text.slice(0, 80))}` : ''}</div></div>`).join('')}</div>` : empty('No documents shared in this chat yet. Use the paperclip to share one.');
     } else if (tab === 'pins') {
       body = `<div class="chat-files">${pins.length ? pins.slice().reverse().map((p) => `<button class="pin-row" data-a="chat-jump" data-m="${p.id}"><span class="pin-ico">📌</span><span class="grow" style="min-width:0;text-align:left"><b class="small">${esc(nameOf(p.by))}</b> <span class="tiny muted">${fmtDT(p.at)} · pinned by ${esc(nameOf(p.pinnedBy))}</span><span class="small" style="display:block">${esc(String(p.text || '').replace(/[*_~`]/g, ''))}</span></span></button>`).join('') : empty('Nothing pinned yet. Hover a message and press 📌 to keep it here.')}</div>`;
     } else if (tab === 'members') {

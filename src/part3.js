@@ -12,7 +12,8 @@ function toast(msg, tone = 'ok') {
 function fail(msg) { const e = new Error(msg); e.user = true; throw e; }
 function errText(e) {
   if (e?.user) return e.message;
-  if (e?.code === 'invalid_argument') { S.readonly = true; return 'Your access to this app is view-only. Ask the owner to make you a Contributor.'; }
+  // The server never signals view-only access. A bad request (invalid_argument) is shown as-is and must not lock the app.
+  if (e?.code === 'invalid_argument' && e.message) return e.message;
   if (e?.code === 'quota_exceeded') return 'The app database is full. Ask the admin to archive old records.';
   if (e?.code === 'resource_exhausted') return 'Too many changes at once — wait a moment and try again.';
   return 'That didn’t save. Check your connection and try again.';
