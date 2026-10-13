@@ -2,6 +2,7 @@
 import { q, getPool, ensureSchema, writeDoc, getDoc, parentOf } from './db.js';
 import { sessionFrom, hashPassword, checkPassword, passwordProblem, newUid, makeToken, cookieHeader, safeEqual } from './auth.js';
 import { chatWriteProblem } from './chat-rules.js';
+import { isComplaintStaff, isAssignable, canReadComplaint, complaintWriteProblem, buildComplaint } from './complaints.js';
 
 const SALARY = new Set(['pay', 'payroll', 'fines']);
 const PROTECTED_EMP = ['role', 'userId', 'active', 'status', 'code', 'email'];
@@ -13,12 +14,22 @@ const fail = (status, code, message) => { throw Object.assign(new Error(message)
 const lower = (s) => String(s || '').trim().toLowerCase();
 const isDocPath = (p) => PATH_RE.test(p) && p.split('/').length % 2 === 0;
 
-function canRead(path, s) {
+const COMPLAINT_PARTS = new Set(['complaint', 'complaintsecret', 'complaintfile']);
+
+function canRead(path, s, data, staff) {
   const [c, a, b] = path.split('/');
   if (c === 'auth') return false;
   if (c === 'data') return a === 'users' && b === s.uid;
   if (SALARY.has(c)) return s.salary;
+  if (COMPLAINT_PARTS.has(c)) return canReadComplaint(path, data, s, staff);
   return true;
+}
+
+/** Whether this session is complaint staff (HR, managers, department heads). Reads cfg/main once per call. */
+async function complaintStaff(s) {
+  if (!s.active) return false;
+  const cfgDoc = (await getDoc('cfg/main'))?.data || null;
+  return isComplaintStaff(s, q, cfgDoc);
 }
 
 function checkWrite(op, path, data, old, s) {
@@ -164,19 +175,42 @@ const routes = {
   },
 
   /* ── data ── */
+  /* Raise a complaint. The server builds the record, so clients cannot choose who the complainant is.
+     The complaint and its complainant record are written together, in one transaction. */
+  'POST complaints/submit': async (req) => {
+    const s = await needSession(req);
+    const built = buildComplaint(req.body || {}, s);
+    const expected = built.doc.attachments.flatMap((a) => Array.from({ length: a.chunks }, (_, i) => `complaintfile/${a.fid}_${i}`));
+    if (expected.length) {
+      const r = await q('SELECT COUNT(*)::int AS n FROM docs WHERE path = ANY($1::text[]) AND NOT deleted', [expected]);
+      if (r.rows[0].n !== expected.length) fail(400, 'invalid_argument', 'An attachment did not finish uploading. Try attaching it again.');
+    }
+    const client = await getPool().connect();
+    try {
+      await client.query('BEGIN');
+      await writeDoc(client, 'set', `complaint/${built.id}`, built.doc);
+      await writeDoc(client, 'set', `complaintsecret/${built.id}`, built.secret);
+      // The audit entry records the action only: no complainant, so it cannot identify anyone.
+      await addDoc(client, 'audit', { at: built.doc.createdAt, by: null, action: 'COMPLAINT_RAISED', detail: { complaint: built.id } });
+      await client.query('COMMIT');
+    } catch (e) { await client.query('ROLLBACK').catch(() => {}); throw e; } finally { client.release(); }
+    return { ok: true, id: built.id, code: built.doc.code };
+  },
   'POST sync': async (req) => {
     const s = await needSession(req);
     if (!s.active) fail(403, 'revoked', 'Your account is not active.');
     const since = Math.max(0, Number(req.body?.since) || 0);
     const r = await q(
       `SELECT path, data, v, deleted, at > now() - interval '5 seconds' AS fresh FROM docs
-       WHERE v > $1 AND parent NOT LIKE 'blob%' ${since ? '' : 'AND NOT deleted'} ORDER BY v LIMIT 4000`, [since]);
+       WHERE v > $1 AND parent NOT LIKE 'blob%' AND parent NOT LIKE 'complaintfile%' ${since ? '' : 'AND NOT deleted'} ORDER BY v LIMIT 4000`, [since]);
+    const staff = await complaintStaff(s);
     const docs = [];
     let next = since, stop = false;
     for (const row of r.rows) {
       if (row.fresh) stop = true;
       if (!stop) next = Number(row.v);
-      if (canRead(row.path, s)) docs.push(row.deleted ? { p: row.path, v: Number(row.v), x: 1 } : { p: row.path, v: Number(row.v), d: row.data });
+      // Deletions are always passed on (they carry only the id), so a client drops the record it still holds.
+      if (row.deleted || canRead(row.path, s, row.data, staff)) docs.push(row.deleted ? { p: row.path, v: Number(row.v), x: 1 } : { p: row.path, v: Number(row.v), d: row.data });
     }
     // presence ("online now", "typing…") for chat
     const now = Date.now(), peer = String(req.body?.peer || '').slice(0, 64);
@@ -185,16 +219,18 @@ const routes = {
       if (Math.random() < 0.05) q('DELETE FROM presence WHERE at < $1', [now - 3600000]).catch(() => {});
     }
     const peers = (await q('SELECT peer, uid, state, at FROM presence WHERE at > $1', [now - 75000])).rows.map((p) => ({ peer: p.peer, by: p.uid, presence: p.state || {}, at: Number(p.at) }));
-    return { docs, next, more: r.rows.length === 4000, scope: `${s.uid}:${s.salary ? 'S' : ''}`, peers };
+    return { docs, next, more: r.rows.length === 4000, scope: `${s.uid}:${s.salary ? 'S' : ''}${staff ? 'C' : ''}${s.admin ? 'A' : ''}`, peers };
   },
   'GET doc': async (req) => {
     const s = await needSession(req);
     // Not "path": on Vercel the /api/* rewrite already sets path=doc, so a second path= becomes ambiguous.
     const path = String(req.query.p || '');
     if (!isDocPath(path)) fail(400, 'invalid_argument', 'Bad path.');
-    if (!canRead(path, s)) return { exists: false };
     const d = await getDoc(path);
-    return d ? { exists: true, data: d.data, v: d.v } : { exists: false };
+    if (!d) return { exists: false };
+    const staff = COMPLAINT_PARTS.has(path.split('/')[0]) ? await complaintStaff(s) : false;
+    if (!canRead(path, s, d.data, staff)) return { exists: false };
+    return { exists: true, data: d.data, v: d.v };
   },
   'POST write': async (req) => {
     const s = await needSession(req);
@@ -208,6 +244,13 @@ const routes = {
     const parent = parts[0] === 'chat' && parts.length === 4 ? (await getDoc(`chat/${parts[1]}`))?.data || null : null;
     const chatBad = chatWriteProblem(op, path, data, old, s, parent);
     if (chatBad) fail(403, 'permission_denied', chatBad);
+    if (COMPLAINT_PARTS.has(parts[0])) {
+      const cfgDoc = (await getDoc('cfg/main'))?.data || null;
+      const staff = await isComplaintStaff(s, q, cfgDoc);
+      const assigneeOk = typeof data?.assignedTo === 'string' && data.assignedTo ? await isAssignable(data.assignedTo, q, cfgDoc) : !data?.assignedTo;
+      const complaintBad = complaintWriteProblem(op, path, data, old, s, { staff, assigneeOk });
+      if (complaintBad) fail(403, 'permission_denied', complaintBad);
+    }
     const v = await writeDoc(getPool(), op, path, op === 'delete' ? null : data);
     if (op !== 'delete') await mailIfQueued(path, op === 'update' ? { ...(old || {}), ...data } : data);
     return { v };

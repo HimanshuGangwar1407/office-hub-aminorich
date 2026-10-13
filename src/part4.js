@@ -27,7 +27,7 @@ const ui = (k, d) => (S.ui[k] ?? d);
 /* ═════════════ Shell ═════════════ */
 const VIEWS = [
   ['dashboard', 'Dashboard', () => true], ['chats', 'Chats', () => canView('chats')], ['attendance', 'Attendance', () => canView('attendance')], ['leave', 'Leave', () => canView('leave')], ['tasks', 'Tasks', () => canView('tasks')],
-  ['worklog', 'Work log', () => canView('worklog')], ['approvals', 'Approvals', () => canView('approvals')], ['claims', 'Claims', () => canView('claims')], ['departments', 'Departments', () => canView('departments')],
+  ['worklog', 'Work log', () => canView('worklog')], ['approvals', 'Approvals', () => canView('approvals')], ['claims', 'Claims', () => canView('claims')], ['complaints', 'Complaints', () => true], ['departments', 'Departments', () => canView('departments')],
   ['people', 'People', () => canView('people', isManager)], ['reports', 'Reports', () => canView('reports', isManager)], ['settings', 'Settings', () => canView('settings', isHR)],
 ];
 const ICON = {
@@ -39,6 +39,7 @@ const ICON = {
   worklog: 'M6 3h10l3 3v15H6zM9 9h6M9 13h6M9 17h4',
   approvals: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12l3 3 5-6',
   claims: 'M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6M9 16h3',
+  complaints: 'M4 5h16v11H9l-5 4zM8 9h8M8 12h5',
   departments: 'M4 21V8l8-5 8 5v13M9 21v-6h6v6M8 10h.01M12 10h.01M16 10h.01',
   people: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21v-1a6 6 0 0 1 12 0v1M16 3.5a4 4 0 0 1 0 7M22 21v-1a6 6 0 0 0-4-5.6',
   reports: 'M4 20h16M7 16V10M12 16V5M17 16v-8',
@@ -46,8 +47,8 @@ const ICON = {
   more: 'M5 12h.01M12 12h.01M19 12h.01',
 };
 const ico = (k) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICON[k] || ICON.more}"/></svg>`;
-const SEC = { dashboard: 'teal', chats: 'sky', attendance: 'blue', leave: 'violet', tasks: 'amber', worklog: 'leaf', approvals: 'coral', claims: 'gold', departments: 'indigo', people: 'rose', reports: 'cyan', settings: 'slate' };
-const NAV_GROUPS = [['Workspace', ['dashboard', 'chats', 'attendance', 'leave', 'tasks', 'worklog']], ['Requests', ['approvals', 'claims']], ['Organisation', ['departments', 'people', 'reports', 'settings']]];
+const SEC = { dashboard: 'teal', chats: 'sky', attendance: 'blue', leave: 'violet', tasks: 'amber', worklog: 'leaf', approvals: 'coral', claims: 'gold', complaints: 'rose', departments: 'indigo', people: 'rose', reports: 'cyan', settings: 'slate' };
+const NAV_GROUPS = [['Workspace', ['dashboard', 'chats', 'attendance', 'leave', 'tasks', 'worklog']], ['Requests', ['approvals', 'claims', 'complaints']], ['Organisation', ['departments', 'people', 'reports', 'settings']]];
 const MOBILE_NAV = ['dashboard', 'attendance', 'tasks', 'approvals'];
 function shell(content, title, sub, actions = '') {
   const inbox = myInbox().length, unread = S.ntf.filter((n) => !n.read).length, chatUnread = unreadCount();
