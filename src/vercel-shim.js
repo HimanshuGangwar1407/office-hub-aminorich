@@ -82,12 +82,12 @@
   async function sync() {
     if (busy) return; busy = true; clearTimeout(timer);
     try {
-      let again = true;
+      let again = true, cleared = null;
       while (again) {
         const body = { since, peer };
         if (presence && (presenceDirty || Date.now() - presenceSent > PRESENCE_EVERY_MS)) { body.presence = presence; presenceDirty = false; presenceSent = Date.now(); }
         const r = await api('sync', body);
-        if (scope && r.scope !== scope) { docs.clear(); since = 0; scope = r.scope; continue; } // permissions changed: reload everything
+        if (scope && r.scope !== scope) { cleared = new Set([...docs.keys()].map(parentOf)); docs.clear(); since = 0; scope = r.scope; continue; } // permissions changed: reload everything
         scope = r.scope;
         const changed = new Set();
         for (const row of r.docs) {
@@ -101,7 +101,11 @@
         since = Math.max(since, r.next);
         if (Array.isArray(r.peers)) setPeers(r.peers);
         if (!synced) { synced = true; syncWaiters.splice(0).forEach((f) => f()); }
-        else if (changed.size) notify(changed);
+        else {
+          // after a reload, also tell lists that came back empty, so records you may no longer see disappear
+          if (cleared) { for (const p of cleared) changed.add(p); cleared = null; }
+          if (changed.size) notify(changed);
+        }
       }
       online(true);
     } catch (e) {

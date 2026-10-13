@@ -242,6 +242,7 @@ function vSettings() {
     <label class="check full"><input type="checkbox" id="s-web" name="webPunch" ${C.webPunch ? 'checked' : ''}> Allow check-in / check-out from the app</label>
     <label class="f">Location on WFH / official-duty days<select class="i" id="s-wloc" name="wfhLoc">${opts([['required', 'Required at check-in and check-out'], ['optional', 'Asked, but can be skipped'], ['off', 'Not asked']], C.wfhLoc || 'required')}</select></label>
     <label class="f">Ask to re-share location every (hours, 0 = never)<input class="i" id="s-loch" name="locEveryH" type="number" min="0" max="12" value="${C.locEveryH ?? 3}"></label>
+    <label class="f">Live location sharing — update every (minutes)<input class="i" id="s-live" name="liveEveryMin" type="number" min="2" max="60" value="${C.liveEveryMin ?? 10}"></label>
     <div class="full"><button class="btn pri" type="submit">Save</button></div></form>
     <p class="tiny muted">Approval paths: leave → reporting manager (+ HR above the day limit); attendance correction → manager → HR; WFH/OD and overtime → manager; deadline extension → task assigner; task review → reviewer; expense → manager → Accounts head (+ Director above the limit); purchase → manager → Director; documents, HR help and employee changes → HR. Nobody approves their own request.</p>`);
   if (tab === 'calendar') body += `<div class="grid g2">${card('Shift', `<form data-f="cfg-shift" class="fgrid">

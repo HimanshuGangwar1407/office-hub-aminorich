@@ -1,6 +1,6 @@
 <script>
 /* ═════════════ Render loop ═════════════ */
-const VIEW_FN = { dashboard: vDashboard, chats: vChats2, attendance: vAttendance, leave: vLeave, tasks: vTasks, worklog: vWorklog, approvals: vApprovals, claims: vClaims, departments: vDepartments, people: vPeople, reports: vReports, settings: vSettings };
+const VIEW_FN = { dashboard: vDashboard, chats: vChats2, attendance: vAttendance, wfhlive: vWfhLive, leave: vLeave, tasks: vTasks, worklog: vWorklog, approvals: vApprovals, claims: vClaims, departments: vDepartments, people: vPeople, reports: vReports, settings: vSettings };
 let raf = 0, viewChanged = true;
 function schedule() { if (!raf) raf = requestAnimationFrame(() => { raf = 0; render(); }); }
 function morph(root, html, fresh = false) {
@@ -30,6 +30,7 @@ function render() {
   const html = !S.me ? vSetup() : authed === true ? VIEW_FN[S.view]() : vLogin();
   morph($('#app'), html, viewChanged);
   if (authed === true && S.view === 'chats') chatAfterRender(prevChatScroll);
+  if (authed === true && S.view === 'wfhlive') wfhAfterRender();
   if (viewChanged) window.scrollTo(0, 0);
   viewChanged = false;
   if (M) { if (authed === true) drawModal(false); else closeModal(); }
@@ -60,7 +61,7 @@ async function onAction(a, el, ev) {
     case 'punch': {
       if (!cfg().webPunch) return toast('Check-in from the app is switched off.', 'warn');
       if (needsLoc(S.me.id, today())) return openModal(() => locForm(punchMode()));
-      return act(() => addPunches(S.me.id, today(), [Date.now()], 'web'), 'Punch recorded at ' + hm(Date.now()));
+      return act(async () => { const out = punchMode() === 'out'; await addPunches(S.me.id, today(), [Date.now()], 'web'); if (out) await stopLive(true, true); }, 'Punch recorded at ' + hm(Date.now()));
     }
     case 'wl-day': { const d = el.dataset.d; if (!d) return; Object.assign(S.ui, { wlDate: d, wlMonth: d.slice(0, 7), wlTab: 'mine' }); if (S.view !== 'worklog') return setView('worklog'); return schedule(); }
     case 'wl-month': S.ui.wlMonth = el.dataset.m; return schedule();
@@ -127,7 +128,7 @@ async function onAction(a, el, ev) {
     case 'export-att-day': { const d = ui('attDate', today()); return exportXlsx(`Attendance ${d}`, ['Code', 'Name', 'Department', 'Status', 'In', 'Out', 'Worked (h)', 'Late (min)', 'Location', 'Notes'], scope().map(empById).filter(Boolean).map((e) => { const s = dayStatus(e, d); return [e.code, e.name, deptOf(e.deptId)?.name || '', STATUS[s.code]?.[0] || '', hm(s.inT), hm(s.outT), round2(s.work / 60), s.lateMin || '', locText(e.id, d), s.note]; })); }
     default: if (a === 'cmdk-open') return openCmdk(); if (a === 'cmdk-go') return cmdkRun(cmdkItems()[+el.dataset.i || 0]); if (a.startsWith('chat-') || a.startsWith('cmdk-')) return chatAction2(a, el, ev); if (a.startsWith('loc-')) return locAction(a, el, ev); if (a.startsWith('pay-')) return payAction(a, el, ev); if (a.startsWith('claim-') || a.startsWith('cl-')) return claimAction(a, el, ev);
       if (a === 'acct') { S.ui.moreOpen = ''; return openModal(accountModal); }
-      if (a === 'acct-signout') return signOut();
+      if (a === 'acct-signout') { await stopLive(true, true).catch(() => {}); return signOut(); }
       if (a === 'acct-reset') { const e = empById(id); return confirmBox(`Reset ${e.name}’s password?`, 'They will be signed out and asked to create a new password the next time they open OfficeHub.', async () => { if (!e.userId) fail('This employee has no account yet.'); if (S.canEdit === false) fail('You need Editor access to the app to reset passwords.'); await S.db.doc(`auth/${e.userId}`).delete(); await audit('PASSWORD_RESET', { emp: e.id }); await notify([e.id], { title: 'Your OfficeHub password was reset', body: `Reset by ${S.me.name}. Open OfficeHub to create a new one.` }); }, { danger: true }); }
       if (a.startsWith('mail-')) return mailAction(a);
       if (a === 'acc-edit') { const k = el.dataset.k; return openModal(() => accessForm(k)); }
@@ -373,7 +374,7 @@ async function onSubmit(f, form, fd, submitter) {
       await put(`tpl/${newId()}`, { title: v('title'), assigneeId: v('assigneeId'), priority: v('priority'), freq: v('freq'), dow: +v('dow'), dom: Math.min(28, Math.max(1, +v('dom') || 1)), dueIn: +v('dueIn') || 0, needsReview: fd.get('needsReview') === 'on', checklist: v('checklist').split('\n').map((s) => s.trim()).filter(Boolean), createdBy: S.me.id, active: true, lastGen: '' });
       recurringRan = false; form.reset();
     }, 'Recurring task added');
-    case 'cfg-general': return act(async () => { await saveCfg({ company: v('company') || cfg().company, attSource: v('attSource'), slaHours: Math.max(1, +v('slaHours') || 24), hrLeaveAbove: +v('hrLeaveAbove') || 0, directorExpenseAbove: +v('directorExpenseAbove') || 0, webPunch: fd.get('webPunch') === 'on', wfhLoc: v('wfhLoc') || 'required', locEveryH: Math.max(0, Math.min(12, +v('locEveryH') || 0)) }); await audit('SETTINGS_CHANGED', { section: 'general' }); }, 'Settings saved');
+    case 'cfg-general': return act(async () => { await saveCfg({ company: v('company') || cfg().company, attSource: v('attSource'), slaHours: Math.max(1, +v('slaHours') || 24), hrLeaveAbove: +v('hrLeaveAbove') || 0, directorExpenseAbove: +v('directorExpenseAbove') || 0, webPunch: fd.get('webPunch') === 'on', wfhLoc: v('wfhLoc') || 'required', locEveryH: Math.max(0, Math.min(12, +v('locEveryH') || 0)), liveEveryMin: Math.max(2, Math.min(60, Math.round(+v('liveEveryMin') || 10))) }); await audit('SETTINGS_CHANGED', { section: 'general' }); }, 'Settings saved');
     case 'cfg-shift': return act(async () => { await saveCfg({ shift: { start: v('start'), end: v('end'), grace: +v('grace') || 0, halfMin: +v('halfMin') || 240 }, weeklyOff: fd.getAll('wo').map(Number), secondSat: fd.get('secondSat') === 'on' }); await audit('SETTINGS_CHANGED', { section: 'shift' }); }, 'Shift saved');
     case 'hol-add': return act(async () => { await saveCfg({ holidays: [...cfg().holidays.filter((h) => h.date !== v('date')), { date: v('date'), name: v('name'), optional: fd.get('optional') === 'on' }] }); form.reset(); }, 'Holiday added');
     case 'cfg-leave': return act(async () => {
@@ -389,7 +390,7 @@ async function onSubmit(f, form, fd, submitter) {
       const depts = ids.map((d, i) => ({ id: String(d) || newId(), name: String(names[i]).trim(), code: String(codes[i]).trim().toUpperCase() || String(names[i]).trim().slice(0, 3).toUpperCase(), headId: String(heads[i]) || '' })).filter((d) => d.name);
       await saveCfg({ depts }); await audit('DEPARTMENTS_CHANGED', { count: depts.length });
     }, 'Departments saved');
-    default: if (f.startsWith('chat-')) return chatSubmit2(f, form, fd); if (f === 'loc') return locSubmit(form, fd); if (['pay-rules', 'acc-save', 'pay-fine'].includes(f)) return paySubmit(f, form, fd); if (f === 'claim') return claimSubmit(form, fd); if (f.startsWith('auth-') || f === 'acct-prefs') return authSubmit(f, form, fd); if (f === 'claim-paid') return claimPaidSubmit(form, fd); if (f === 'claim-pol') return claimPolSubmit(form, fd); return;
+    default: if (f.startsWith('chat-')) return chatSubmit2(f, form, fd); if (f === 'loc') return locSubmit(form, fd); if (f === 'loc-live') return liveSubmit(form, fd); if (['pay-rules', 'acc-save', 'pay-fine'].includes(f)) return paySubmit(f, form, fd); if (f === 'claim') return claimSubmit(form, fd); if (f.startsWith('auth-') || f === 'acct-prefs') return authSubmit(f, form, fd); if (f === 'claim-paid') return claimPaidSubmit(form, fd); if (f === 'claim-pol') return claimPolSubmit(form, fd); return;
     case 'ann-add': return act(async () => {
       await saveCfg({ announcements: [...(cfg().announcements || []), { id: newId(), title: v('title'), body: v('body'), until: v('until'), by: S.me.id, at: Date.now() }].slice(-20) });
       if (fd.get('notify') === 'on') await notify(active().map((e) => e.id), { title: `Announcement: ${v('title')}`, body: v('body').slice(0, 200), go: { view: 'dashboard' } });
