@@ -4,6 +4,7 @@ import { sessionFrom, hashPassword, checkPassword, passwordProblem, newUid, make
 import { chatWriteProblem, clearedChatsProblem } from './chat-rules.js';
 import { locWriteProblem, LIVE_STOPPED } from './loc-rules.js';
 import { buildCtx, accessFor, canReadDoc, shapeDoc, empWriteProblem, chatAccessProblem, ntfWriteProblem, mailWriteProblem, blobReadable, blobWriteProblem, refUsesFile } from './access.js';
+import { isAssignableCtx, complaintWriteProblem, buildComplaint } from './complaints.js';
 
 const SALARY = new Set(['pay', 'payroll', 'fines']);
 // managerId and deptId decide who may see someone's WFH locations (server/loc-rules.js), so only HR may change them
@@ -59,6 +60,13 @@ async function checkWrite(op, path, data, old, s, A) {
   if (c === 'chat') { const bad = chatAccessProblem(op, path, data, old, A); if (bad) no(bad); return; }
   if (c === 'ntf') { const bad = ntfWriteProblem(op, data, old, s); if (bad) no(bad); return; }
   if (c === 'mail') { const bad = mailWriteProblem(op, data, old, A); if (bad) no(bad); return; }
+  if (c === 'complaint' || c === 'complaintsecret' || c === 'complaintfile') {
+    // assignees must be HR or managers; the rules themselves are in server/complaints.js
+    const assigneeOk = typeof data?.assignedTo === 'string' && data.assignedTo ? isAssignableCtx(data.assignedTo, A.ctx) : !data?.assignedTo;
+    const bad = complaintWriteProblem(op, path, data, old, s, { staff: A.complaintStaff, assigneeOk });
+    if (bad) no(bad);
+    return;
+  }
   if (c === 'blob') { const bad = blobWriteProblem(op, data, old, old && old.by !== s.empId ? await blobRefs(fidOf(path, old), old.by) : [], A); if (bad) no(bad); return; }
   if (c === 'data') {
     if (!(a === 'users' && b === s.uid)) no();
@@ -203,13 +211,34 @@ const routes = {
   },
 
   /* ── data ── */
+  /* Raise a complaint. The server builds the record, so clients cannot choose who the complainant is.
+     The complaint and its complainant record are written together, in one transaction. */
+  'POST complaints/submit': async (req) => {
+    const s = await needSession(req);
+    const built = buildComplaint(req.body || {}, s);
+    const expected = built.doc.attachments.flatMap((a) => Array.from({ length: a.chunks }, (_, i) => `complaintfile/${a.fid}_${i}`));
+    if (expected.length) {
+      const r = await q('SELECT COUNT(*)::int AS n FROM docs WHERE path = ANY($1::text[]) AND NOT deleted', [expected]);
+      if (r.rows[0].n !== expected.length) fail(400, 'invalid_argument', 'An attachment did not finish uploading. Try attaching it again.');
+    }
+    const client = await getPool().connect();
+    try {
+      await client.query('BEGIN');
+      await writeDoc(client, 'set', `complaint/${built.id}`, built.doc);
+      await writeDoc(client, 'set', `complaintsecret/${built.id}`, built.secret);
+      // The audit entry records the action only: no complainant, so it cannot identify anyone.
+      await addDoc(client, 'audit', { at: built.doc.createdAt, by: null, action: 'COMPLAINT_RAISED', detail: { complaint: built.id } });
+      await client.query('COMMIT');
+    } catch (e) { await client.query('ROLLBACK').catch(() => {}); throw e; } finally { client.release(); }
+    return { ok: true, id: built.id, code: built.doc.code };
+  },
   'POST sync': async (req) => {
     const s = await needSession(req);
     if (!s.active) fail(403, 'revoked', 'Your account is not active.');
     const since = Math.max(0, Number(req.body?.since) || 0);
     const r = await q(
       `SELECT path, data, v, deleted, at > now() - interval '5 seconds' AS fresh FROM docs
-       WHERE v > $1 AND parent NOT LIKE 'blob%' ${since ? '' : 'AND NOT deleted'} ORDER BY v LIMIT 4000`, [since]);
+       WHERE v > $1 AND parent NOT LIKE 'blob%' AND parent NOT LIKE 'complaintfile%' ${since ? '' : 'AND NOT deleted'} ORDER BY v LIMIT 4000`, [since]);
     // built after reading the batch, so a chat created just before it is already known
     const docs = [], A = await accessOf(s);
     let next = since, stop = false;

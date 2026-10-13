@@ -151,7 +151,7 @@
     return {
       id: idOf(path), path,
       async get() {
-        if (path.startsWith('blob/') || !synced) { const r = await api('doc?p=' + encodeURIComponent(path)); return docSnap(path, r.exists ? { d: r.data, v: r.v } : null); }
+        if (path.startsWith('blob/') || path.startsWith('complaintfile/') || !synced) { const r = await api('doc?p=' + encodeURIComponent(path)); return docSnap(path, r.exists ? { d: r.data, v: r.v } : null); }
         return docSnap(path, docs.get(path));
       },
       set: (data) => write('set', path, data),

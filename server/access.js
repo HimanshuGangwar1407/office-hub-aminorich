@@ -12,6 +12,7 @@
 //    changed or deleted only by the uploader, a group admin deleting the group's files, or HR.
 import { seesAllLocations, locVisible } from './loc-rules.js';
 import { isGroupAdmin } from './chat-rules.js';
+import { canReadComplaint, isComplaintStaffCtx } from './complaints.js';
 
 const MGMT = ['ADMIN', 'HR', 'DIRECTOR'];
 const SELF_EDITABLE = new Set(['prefs', 'wfhLoc']);
@@ -52,8 +53,10 @@ export function accessFor(s, ctx) {
   // changes, the browser must reload its copy so it gets — or drops — their older messages
   const shared = [...ctx.chats.keys()].filter((id) => !id.startsWith('dm-') && id !== 'all' && chatOk(id));
   for (const d of ctx.depts) if (d?.id && chatOk('dept-' + d.id)) shared.push('dept-' + d.id);
-  const sig = `${all ? 'all' : 'own'}.c${hash([...new Set(shared)].sort().join(','))}`;
-  return { s, ctx, active, all, mgmt, chatOk, seesEmpLoc, sig };
+  // complaint staff see every complaint (never the complainant's identity); administrators also see who raised one
+  const complaintStaff = active && isComplaintStaffCtx(s, ctx);
+  const sig = `${all ? 'all' : 'own'}.c${hash([...new Set(shared)].sort().join(','))}.k${complaintStaff ? 1 : 0}${s?.admin ? 'a' : ''}`;
+  return { s, ctx, active, all, mgmt, chatOk, seesEmpLoc, complaintStaff, sig };
 }
 
 /** Can this record be sent to the session? `data` is null for deleted records. (Files are checked separately.) */
@@ -69,6 +72,7 @@ export function canReadDoc(path, data, A) {
   if (c === 'ntf') return !data || data.to === s.empId;
   if (c === 'mail') return !data || !!s.hr || data.empId === s.empId;
   if (c === 'blob') return false;
+  if (c === 'complaint' || c === 'complaintsecret' || c === 'complaintfile') return canReadComplaint(path, data, s, A.complaintStaff);
   return true;
 }
 

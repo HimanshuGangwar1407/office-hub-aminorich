@@ -149,19 +149,21 @@ async function uploadFile(file) {
   return { name: file.name, size: file.size, ext, fid, chunks };
 }
 /* Splits bytes into base64 chunk documents under blob/ and returns the file id and chunk count. */
-async function putChunked(buf, label) {
+async function putChunked(buf, label, store = 'blob') {
   let bin = ''; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
   const b64 = btoa(bin), fid = newId(), n = Math.ceil(b64.length / CHUNK);
   for (let i = 0; i < n; i++) {
     CHAT.uploading = `${label} — ${Math.round((i / n) * 100)}%`; schedule();
-    await put(`blob/${fid}_${i}`, { fid, i, n, by: S.me.id, data: b64.slice(i * CHUNK, (i + 1) * CHUNK) });
+    // Complaint attachments record no uploader, so they cannot be tied to the person who sent them.
+    const chunk = { fid, i, n, data: b64.slice(i * CHUNK, (i + 1) * CHUNK) };
+    await put(`${store}/${fid}_${i}`, store === 'blob' ? { ...chunk, by: S.me.id } : chunk);
   }
   return { fid, chunks: n };
 }
 async function fileBlob(f) {
   if (f.asset) { const r = await fetch('/_blob/' + f.asset); if (!r.ok) fail('That file is no longer available.'); return r.blob(); }
   let b64 = '';
-  for (let i = 0; i < f.chunks; i++) { const s = await docRef(`blob/${f.fid}_${i}`).get(); if (!s.exists) fail('That file is no longer available.'); b64 += s.data().data; }
+  for (let i = 0; i < f.chunks; i++) { const s = await docRef(`${f.store || 'blob'}/${f.fid}_${i}`).get(); if (!s.exists) fail('That file is no longer available.'); b64 += s.data().data; }
   const bin = atob(b64), arr = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   return new Blob([arr], { type: f.mime || ASSET_TYPES[f.ext] || 'application/octet-stream' });
