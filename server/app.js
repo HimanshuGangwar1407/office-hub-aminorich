@@ -5,6 +5,7 @@ import { chatWriteProblem, clearedChatsProblem } from './chat-rules.js';
 import { locWriteProblem, LIVE_STOPPED } from './loc-rules.js';
 import { buildCtx, accessFor, canReadDoc, shapeDoc, empWriteProblem, chatAccessProblem, ntfWriteProblem, mailWriteProblem, blobReadable, blobWriteProblem, refUsesFile } from './access.js';
 import { isAssignableCtx, complaintWriteProblem, buildComplaint } from './complaints.js';
+import { policyWriteProblem, policyFileWriteProblem, policyVisible, isPolicyManager } from './policy.js';
 
 const SALARY = new Set(['pay', 'payroll', 'fines']);
 // managerId and deptId decide who may see someone's WFH locations (server/loc-rules.js), so only HR may change them
@@ -32,7 +33,10 @@ async function accessContext() {
     empCache = { stamp, at: Date.now(), rows: (await q(`SELECT path, data FROM docs WHERE (parent = 'emp' OR path = 'cfg/main') AND NOT deleted`)).rows };
   }
   const chatRows = chats.rows.map((r) => ({ path: r.path, data: { kind: r.kind, members: r.members || [], admins: r.admins || undefined, createdBy: r.createdBy || undefined } }));
-  return buildCtx([...empCache.rows, ...chatRows]);
+  // policies: only who they are for and whether they are published (not the text), so this stays small
+  const policyRows = (await q(`SELECT path, data->>'published' AS published, data->'audience' AS audience FROM docs WHERE parent = 'policy' AND NOT deleted`)).rows
+    .map((r) => ({ path: r.path, data: { published: r.published === 'true', audience: r.audience || {} } }));
+  return buildCtx([...empCache.rows, ...chatRows, ...policyRows]);
 }
 const accessOf = async (s) => accessFor(s, await accessContext());
 
@@ -60,6 +64,8 @@ async function checkWrite(op, path, data, old, s, A) {
   if (c === 'chat') { const bad = chatAccessProblem(op, path, data, old, A); if (bad) no(bad); return; }
   if (c === 'ntf') { const bad = ntfWriteProblem(op, data, old, s); if (bad) no(bad); return; }
   if (c === 'mail') { const bad = mailWriteProblem(op, data, old, A); if (bad) no(bad); return; }
+  if (c === 'policy') { const bad = policyWriteProblem(op, path, data, old, s, A.ctx); if (bad) no(bad); return; }
+  if (c === 'policyfile') { const bad = policyFileWriteProblem(op, data, s, A.ctx); if (bad) no(bad); return; }
   if (c === 'complaint' || c === 'complaintsecret' || c === 'complaintfile') {
     // assignees must be HR or managers; the rules themselves are in server/complaints.js
     const assigneeOk = typeof data?.assignedTo === 'string' && data.assignedTo ? isAssignableCtx(data.assignedTo, A.ctx) : !data?.assignedTo;
@@ -238,7 +244,7 @@ const routes = {
     const since = Math.max(0, Number(req.body?.since) || 0);
     const r = await q(
       `SELECT path, data, v, deleted, at > now() - interval '5 seconds' AS fresh FROM docs
-       WHERE v > $1 AND parent NOT LIKE 'blob%' AND parent NOT LIKE 'complaintfile%' ${since ? '' : 'AND NOT deleted'} ORDER BY v LIMIT 4000`, [since]);
+       WHERE v > $1 AND parent NOT LIKE 'blob%' AND parent NOT LIKE 'complaintfile%' AND parent NOT LIKE 'policyfile%'${since ? '' : 'AND NOT deleted'} ORDER BY v LIMIT 4000`, [since]);
     // built after reading the batch, so a chat created just before it is already known
     const docs = [], A = await accessOf(s);
     let next = since, stop = false;
@@ -262,6 +268,14 @@ const routes = {
     const path = String(req.query.p || '');
     if (!isDocPath(path)) fail(400, 'invalid_argument', 'Bad path.');
     const A = await accessOf(s), d = await getDoc(path);
+    if (path.startsWith('policyfile/')) {
+      // an attachment is readable when some policy that uses it is visible to the reader
+      const m = /^policyfile\/([A-Za-z0-9]{4,64})_\d+$/.exec(path);
+      if (!d || !m || !A.active) return { exists: false };
+      const users = (await q(`SELECT data FROM docs WHERE parent = 'policy' AND NOT deleted AND data->'attachments' @> $1::jsonb LIMIT 50`, [JSON.stringify([{ fid: m[1] }])])).rows;
+      const ok = users.some((r) => policyVisible(r.data, s, A.ctx, A.policyMgr));
+      return ok ? { exists: true, data: d.data, v: d.v } : { exists: false };
+    }
     if (path.startsWith('blob/')) return d && blobReadable(d.data, await blobRefs(fidOf(path, d.data), d.data?.by), A) ? { exists: true, data: d.data, v: d.v } : { exists: false };
     if (!canReadDoc(path, d?.data ?? null, A)) return { exists: false };
     return d ? { exists: true, data: shapeDoc(path, d.data, A), v: d.v } : { exists: false };

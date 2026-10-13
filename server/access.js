@@ -13,22 +13,24 @@
 import { seesAllLocations, locVisible } from './loc-rules.js';
 import { isGroupAdmin } from './chat-rules.js';
 import { canReadComplaint, isComplaintStaffCtx } from './complaints.js';
+import { isPolicyManager, policyVisible } from './policy.js';
 
 const MGMT = ['ADMIN', 'HR', 'DIRECTOR'];
 const SELF_EDITABLE = new Set(['prefs', 'wfhLoc']);
 
 /** rows: [{ path, data }] for emp/*, chat/* and cfg/main (not deleted). */
 export function buildCtx(rows) {
-  const emps = new Map(), chats = new Map();
+  const emps = new Map(), chats = new Map(), policies = new Map();
   let depts = [];
   for (const { path, data } of rows) {
     if (!data) continue;
     const [c, id, more] = path.split('/');
     if (c === 'emp' && id && !more) emps.set(id, data);
     else if (c === 'chat' && id && !more) chats.set(id, data);
+    else if (c === 'policy' && id && !more) policies.set(id, data); // only { published, audience } are loaded for policies
     else if (path === 'cfg/main') depts = Array.isArray(data.depts) ? data.depts : [];
   }
-  return { emps, chats, depts };
+  return { emps, chats, depts, policies };
 }
 
 const hash = (str) => { let h = 0; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
@@ -55,8 +57,12 @@ export function accessFor(s, ctx) {
   for (const d of ctx.depts) if (d?.id && chatOk('dept-' + d.id)) shared.push('dept-' + d.id);
   // complaint staff see every complaint (never the complainant's identity); administrators also see who raised one
   const complaintStaff = active && isComplaintStaffCtx(s, ctx);
-  const sig = `${all ? 'all' : 'own'}.c${hash([...new Set(shared)].sort().join(','))}.k${complaintStaff ? 1 : 0}${s?.admin ? 'a' : ''}`;
-  return { s, ctx, active, all, mgmt, chatOk, seesEmpLoc, complaintStaff, sig };
+  // policies this session may see: when that set changes (publish, unpublish, a department change), the browser
+  // reloads its copy, so policies it may no longer see are dropped
+  const policyMgr = active && isPolicyManager(s, ctx);
+  const visiblePolicies = [...ctx.policies.keys()].filter((id) => policyVisible(ctx.policies.get(id), s, ctx, policyMgr)).sort();
+  const sig = `${all ? 'all' : 'own'}.c${hash([...new Set(shared)].sort().join(','))}.k${complaintStaff ? 1 : 0}${s?.admin ? 'a' : ''}.p${hash(visiblePolicies.join(','))}`;
+  return { s, ctx, active, all, mgmt, chatOk, seesEmpLoc, complaintStaff, policyMgr, sig };
 }
 
 /** Can this record be sent to the session? `data` is null for deleted records. (Files are checked separately.) */
@@ -73,6 +79,8 @@ export function canReadDoc(path, data, A) {
   if (c === 'mail') return !data || !!s.hr || data.empId === s.empId;
   if (c === 'blob') return false;
   if (c === 'complaint' || c === 'complaintsecret' || c === 'complaintfile') return canReadComplaint(path, data, s, A.complaintStaff);
+  if (c === 'policy') return policyVisible(data, s, A.ctx, A.policyMgr);
+  if (c === 'policyfile') return false; // read only through a policy the reader may see (app.js)
   return true;
 }
 
