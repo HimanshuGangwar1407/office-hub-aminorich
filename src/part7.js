@@ -1,6 +1,6 @@
 <script>
 /* ═════════════ Render loop ═════════════ */
-const VIEW_FN = { dashboard: vDashboard, chats: vChats2, attendance: vAttendance, leave: vLeave, tasks: vTasks, worklog: vWorklog, approvals: vApprovals, claims: vClaims, departments: vDepartments, people: vPeople, reports: vReports, settings: vSettings };
+const VIEW_FN = { dashboard: vDashboard, chats: vChats2, attendance: vAttendance, wfhlive: vWfhLive, leave: vLeave, tasks: vTasks, worklog: vWorklog, approvals: vApprovals, claims: vClaims, departments: vDepartments, people: vPeople, reports: vReports, settings: vSettings };
 let raf = 0, viewChanged = true;
 function schedule() { if (!raf) raf = requestAnimationFrame(() => { raf = 0; render(); }); }
 function morph(root, html, fresh = false) {
@@ -30,6 +30,7 @@ function render() {
   const html = !S.me ? vSetup() : authed === true ? VIEW_FN[S.view]() : vLogin();
   morph($('#app'), html, viewChanged);
   if (authed === true && S.view === 'chats') chatAfterRender(prevChatScroll);
+  if (authed === true && S.view === 'wfhlive') wfhAfterRender();
   if (viewChanged) window.scrollTo(0, 0);
   viewChanged = false;
   if (M) { if (authed === true) drawModal(false); else closeModal(); }

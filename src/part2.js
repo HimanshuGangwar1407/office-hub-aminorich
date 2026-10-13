@@ -57,6 +57,11 @@ const nameOf = (id) => empById(id)?.name || 'Someone';
 const deptOf = (id) => cfg().depts.find((d) => d.id === id);
 const isMgmt = (e = S.me) => ['ADMIN', 'HR', 'DIRECTOR'].includes(e?.role);
 const isHR = (e = S.me) => ['ADMIN', 'HR'].includes(e?.role);
+// who sees other employees' WFH locations (the WFH Live Location Dashboard). The server enforces the same rule
+// (LOCATION_VIEWER_ROLES in server/loc-rules.js) and sends nobody else other people's locations.
+const LOC_VIEWER_ROLES = ['ADMIN', 'HR', 'MANAGER'];
+const canSeeLocations = (e = S.me) => !!e && e.active !== false && LOC_VIEWER_ROLES.includes(e.role);
+const seesLocOf = (empId) => empId === S.me?.id || canSeeLocations();
 function teamOf(id) {
   const out = new Set();
   const walk = (m) => S.emps.filter((e) => e.managerId === m && !out.has(e.id)).forEach((e) => { out.add(e.id); walk(e.id); });

@@ -580,6 +580,11 @@ const nameOf = (id) => empById(id)?.name || 'Someone';
 const deptOf = (id) => cfg().depts.find((d) => d.id === id);
 const isMgmt = (e = S.me) => ['ADMIN', 'HR', 'DIRECTOR'].includes(e?.role);
 const isHR = (e = S.me) => ['ADMIN', 'HR'].includes(e?.role);
+// who sees other employees' WFH locations (the WFH Live Location Dashboard). The server enforces the same rule
+// (LOCATION_VIEWER_ROLES in server/loc-rules.js) and sends nobody else other people's locations.
+const LOC_VIEWER_ROLES = ['ADMIN', 'HR', 'MANAGER'];
+const canSeeLocations = (e = S.me) => !!e && e.active !== false && LOC_VIEWER_ROLES.includes(e.role);
+const seesLocOf = (empId) => empId === S.me?.id || canSeeLocations();
 function teamOf(id) {
   const out = new Set();
   const walk = (m) => S.emps.filter((e) => e.managerId === m && !out.has(e.id)).forEach((e) => { out.add(e.id); walk(e.id); });
@@ -1073,7 +1078,7 @@ const ui = (k, d) => (S.ui[k] ?? d);
 
 /* ═════════════ Shell ═════════════ */
 const VIEWS = [
-  ['dashboard', 'Dashboard', () => true], ['chats', 'Chats', () => canView('chats')], ['attendance', 'Attendance', () => canView('attendance')], ['leave', 'Leave', () => canView('leave')], ['tasks', 'Tasks', () => canView('tasks')],
+  ['dashboard', 'Dashboard', () => true], ['chats', 'Chats', () => canView('chats')], ['attendance', 'Attendance', () => canView('attendance')], ['wfhlive', 'WFH locations', () => canSeeLocations()], ['leave', 'Leave', () => canView('leave')], ['tasks', 'Tasks', () => canView('tasks')],
   ['worklog', 'Work log', () => canView('worklog')], ['approvals', 'Approvals', () => canView('approvals')], ['claims', 'Claims', () => canView('claims')], ['departments', 'Departments', () => canView('departments')],
   ['people', 'People', () => canView('people', isManager)], ['reports', 'Reports', () => canView('reports', isManager)], ['settings', 'Settings', () => canView('settings', isHR)],
 ];
@@ -1081,6 +1086,7 @@ const ICON = {
   dashboard: 'M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z',
   chats: 'M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H10l-4 3v-3H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z',
   attendance: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2',
+  wfhlive: 'M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11zM12 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z',
   leave: 'M4 6h16v14H4zM4 10h16M8 3v4M16 3v4M9 14l6 4M15 14l-6 4',
   tasks: 'M9 11l2 2 4-4M5 4h14v16H5z',
   worklog: 'M6 3h10l3 3v15H6zM9 9h6M9 13h6M9 17h4',
@@ -1093,8 +1099,8 @@ const ICON = {
   more: 'M5 12h.01M12 12h.01M19 12h.01',
 };
 const ico = (k) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICON[k] || ICON.more}"/></svg>`;
-const SEC = { dashboard: 'teal', chats: 'sky', attendance: 'blue', leave: 'violet', tasks: 'amber', worklog: 'leaf', approvals: 'coral', claims: 'gold', departments: 'indigo', people: 'rose', reports: 'cyan', settings: 'slate' };
-const NAV_GROUPS = [['Workspace', ['dashboard', 'chats', 'attendance', 'leave', 'tasks', 'worklog']], ['Requests', ['approvals', 'claims']], ['Organisation', ['departments', 'people', 'reports', 'settings']]];
+const SEC = { dashboard: 'teal', chats: 'sky', attendance: 'blue', wfhlive: 'sky', leave: 'violet', tasks: 'amber', worklog: 'leaf', approvals: 'coral', claims: 'gold', departments: 'indigo', people: 'rose', reports: 'cyan', settings: 'slate' };
+const NAV_GROUPS = [['Workspace', ['dashboard', 'chats', 'attendance', 'wfhlive', 'leave', 'tasks', 'worklog']], ['Requests', ['approvals', 'claims']], ['Organisation', ['departments', 'people', 'reports', 'settings']]];
 const MOBILE_NAV = ['dashboard', 'attendance', 'tasks', 'approvals'];
 function shell(content, title, sub, actions = '') {
   const inbox = myInbox().length, unread = S.ntf.filter((n) => !n.read).length, chatUnread = unreadCount();
@@ -1235,12 +1241,11 @@ function vDashboard() {
 /* ═════════════ Attendance ═════════════ */
 function vAttendance() {
   const mgr = isManager(), tab = ui('attTab', mgr ? 'today' : 'mine');
-  const tabs = [['today', 'Daily board', mgr], ['live', 'Live locations', mgr], ['mine', 'My attendance', true], ['register', 'Monthly register', mgr], ['salary', 'Salary sheet', canSalary()], ['import', 'Import machine report', isHR()]].filter((t) => t[2]);
+  const tabs = [['today', 'Daily board', mgr], ['mine', 'My attendance', true], ['register', 'Monthly register', mgr], ['salary', 'Salary sheet', canSalary()], ['import', 'Import machine report', isHR()]].filter((t) => t[2]);
   let body = `<div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button class="tab" role="tab" aria-selected="${tab === k}" data-a="ui" data-k="attTab" data-v="${k}">${l}</button>`).join('')}</div>`;
   const T = today();
   if (tab === 'mine') body += monthView(S.me, ui('attMonth', T.slice(0, 7)));
   if (tab === 'salary') body += canSalary() ? vSalary() : '';
-  if (tab === 'live' && mgr) body += vLiveLocations();
   if (tab === 'today') {
     const d = ui('attDate', T), dept = ui('attDept', '');
     const rows = scope().map(empById).filter((e) => e && (!dept || e.deptId === dept)).sort((a, b) => a.name.localeCompare(b.name)).map((e) => ({ e, s: dayStatus(e, d) }));
@@ -2584,6 +2589,7 @@ async function locAction(a, el) {
     }
     case 'loc-photo-rm': if (M) { M.photo = null; drawModal(); } return;
     case 'loc-view': return openModal(() => locDetail(el.dataset.e, el.dataset.d));
+    case 'loc-focus': WFHMAP.focus = el.dataset.e; document.getElementById('wfh-map-slot')?.scrollIntoView({ block: 'center', behavior: 'smooth' }); return schedule();
     case 'loc-pic': {
       const l = locOf(el.dataset.e, el.dataset.d), p = l?.pings?.[+el.dataset.i]; if (!p?.photo) return;
       return act(async () => { const src = await previewSrc(p.photo); if (M) { M.pic = src; drawModal(); } });
@@ -2600,7 +2606,7 @@ function locDetail(empId, d) {
   if (M?.pic) return `${mhead('Photo')}<div class="body" style="text-align:center"><img src="${esc(M.pic)}" alt="Location photo" style="max-width:100%;max-height:70vh;border-radius:8px"></div><footer><button class="btn" data-a="loc-pic-close">Back</button></footer>`;
   return `${mhead(`${esc(e?.name || 'Someone')} — locations`, `${fmtD(d)} · ${remoteKind(empId, d) === 'OD' ? 'Official duty' : remoteKind(empId, d) === 'WFH' ? 'Work from home' : 'Attendance day'}`)}
   <div class="body">
-    ${home ? `<div class="small muted" style="margin-bottom:10px">Usual WFH location: <a href="${mapUrl(home)}" target="_blank" rel="noopener">${esc(home.addr || `${home.lat}, ${home.lng}`)}</a>${isHR() || isMgmt() ? ` · <button class="btn sm ghost" data-a="loc-home-clear" data-e="${empId}">Reset</button>` : ''}</div>` : ''}
+    ${home ? `<div class="small muted" style="margin-bottom:10px">Usual WFH location: <a href="${mapUrl(home)}" target="_blank" rel="noopener">${esc(home.addr || `${home.lat}, ${home.lng}`)}</a>${canSeeLocations() ? ` · <button class="btn sm ghost" data-a="loc-home-clear" data-e="${empId}">Reset</button>` : ''}</div>` : ''}
     ${pings.length ? `<ul class="list">${pings.map((p, i) => { const far = awayFromHome(empId, p); return `<li style="display:block">
       <div class="row" style="justify-content:space-between"><b>${hm(p.t)}</b><span class="row" style="gap:6px">${p.mode === 'in' ? '<span class="pill t-ok">Check-in</span>' : p.mode === 'out' ? '<span class="pill">Check-out</span>' : ''}<span class="pill ${p.src === 'live' ? 't-info' : ''}">${SRC_LABEL[p.src] || 'Shared'}</span></span></div>
       ${p.addr ? `<div class="small">${esc(p.addr)}</div>` : ''}
@@ -2613,6 +2619,7 @@ function locDetail(empId, d) {
 
 /* small cell for the daily board */
 function locCell(empId, d) {
+  if (!seesLocOf(empId)) return ''; // only Admin, HR and Manager accounts receive other people's locations
   const l = locOf(empId, d), p = lastPing(l);
   if (!p) return needsLoc(empId, d) && d <= today() ? '<span class="tiny" style="color:var(--warn)">Not shared</span>' : '';
   const far = awayFromHome(empId, p), live = l.pings.some((x) => x.src === 'live' || x.src === 'live-gps');
@@ -2626,7 +2633,7 @@ function myLocStrip() {
   const T = today(), kind = remoteKind(S.me.id, T), l = locOf(S.me.id, T), p = lastPing(l);
   if (!kind && !p && !LOC.live) return '';
   const every = +(cfg().locEveryH ?? 3), out = punchesOn(S.me.id, T).length % 2 === 0 && punchesOn(S.me.id, T).length > 0;
-  const elsewhere = !LOC.live && !!l?.live?.on && !!l.live.dev && l.live.dev !== LOC.dev && liveStatus(l)[0] === 'live'; // another tab or device is sending
+  const elsewhere = !LOC.live && !!l?.live?.on && !!l.live.dev && l.live.dev !== LOC.dev && wfhState(l) === 'live'; // another tab or device is sending
   const paused = !LOC.live && !!l?.live?.on && !elsewhere; // live sharing was on, but nothing is sending (the app was closed or reloaded)
   const stale = p && every > 0 && !out && !LOC.live && !paused && p.src !== 'live' && Date.now() - p.t > every * 3600000;
   const tone = (LOC.live && !LOC.lastErr) || elsewhere ? 'var(--ok)' : !p || stale || paused || LOC.lastErr ? 'var(--warn)' : 'var(--ok)';
@@ -2645,43 +2652,127 @@ function myLocStrip() {
     ${p ? `<button class="btn sm ghost" data-a="loc-view" data-e="${S.me.id}" data-d="${T}">View</button>` : ''}${btns}</div>`;
 }
 
-/* ── managers / HR / admins: who is sharing right now (Attendance › Live locations) ── */
-function liveStatus(l) {
-  if (l?.live?.on) return Date.now() - (l.last || 0) > ((+l.live.every || 10) * 2 + 2) * 60000 ? ['lost', 'Signal lost', 't-warn'] : ['live', 'Live', 't-ok'];
-  if (l?.live?.stoppedAt) return ['stopped', `Stopped ${hm(l.live.stoppedAt)}`, ''];
-  const p = lastPing(l);
-  if (p) return ['shared', p.src === 'live' ? 'Live link' : 'Shared once', 't-info'];
-  return ['none', 'Not shared', 't-warn'];
+/* ═════════════ WFH Live Location Dashboard ═════════════
+   For Admin, HR and Manager accounts only. The server sends other employees' locations to nobody else
+   (server/loc-rules.js), so this page can only ever show what the viewer is allowed to see.
+   An employee's sharing today is one of:
+     live      – sharing is on and the last update is recent
+     outdated  – sharing is on, but no update for over two intervals (app closed, phone screen off, no network):
+                 shown greyed out and labelled, so an old position is never mistaken for a live one
+     stopped / once / none – not sharing live: listed separately, never on the map */
+const liveOutdated = (l) => Date.now() - (l?.last || 0) > ((+l?.live?.every || 10) * 2 + 2) * 60000;
+function wfhState(l) {
+  if (l?.live?.on) return liveOutdated(l) ? 'outdated' : 'live';
+  if (l?.live?.stoppedAt) return 'stopped';
+  return lastPing(l) ? 'once' : 'none';
 }
 const agoTxt = (t) => { const m = Math.max(0, Math.floor((Date.now() - t) / 60000)); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : `${Math.floor(m / 60)} h ${m % 60} min ago`; };
-function vLiveLocations() {
-  const T = today(), ORDER = { live: 0, lost: 1, shared: 2, stopped: 3, none: 4 };
-  const rows = scope().map(empById).filter((e) => e && e.id !== S.me.id)
-    .map((e) => ({ e, kind: remoteKind(e.id, T), l: locOf(e.id, T) })).filter((r) => r.kind || lastPing(r.l))
-    .map((r) => ({ ...r, st: liveStatus(r.l), p: lastPing(r.l) }))
-    .sort((a, b) => ORDER[a.st[0]] - ORDER[b.st[0]] || a.e.name.localeCompare(b.e.name));
-  const n = (k) => rows.filter((r) => r.st[0] === k).length;
-  const kpis = [['Live now', n('live'), 'ok'], ['Signal lost', n('lost'), n('lost') ? 'warn' : ''], ['Shared once', n('shared') + n('stopped'), ''], ['Not shared', n('none'), n('none') ? 'warn' : '']];
-  const where = (r) => {
-    if (!r.p) return '<span class="tiny muted">—</span>';
-    const far = awayFromHome(r.e.id, r.p);
-    return `<div class="small">${r.p.addr ? esc(r.p.addr) : r.p.lat != null ? `${r.p.lat}, ${r.p.lng}` : 'Map link'}${r.p.acc ? ` <span class="muted">±${r.p.acc} m</span>` : ''}</div>${far != null ? `<div class="tiny" style="${far > 2 ? 'color:var(--warn);font-weight:600' : 'color:var(--muted)'}">${kmTxt(far)} from usual WFH location</div>` : ''}`;
-  };
-  return `<div class="live-kpis">${kpis.map(([l, v, c]) => `<div class="kt" style="cursor:default"><span class="l">${l}</span><span class="v ${c}">${v}</span></div>`).join('')}</div>
-    ${card(`People on WFH / official duty today · ${fmtD(T)}`, rows.length ? `<div class="tbl-wrap"><table class="t live-t"><thead><tr><th>Employee</th><th>Status</th><th>Last update</th><th>Location</th><th></th></tr></thead><tbody>
-      ${rows.map((r) => `<tr><td>${person(r.e.id, `${r.kind === 'OD' ? 'Official duty' : r.kind === 'WFH' ? 'Work from home' : 'Shared a location'} · ${esc(deptOf(r.e.deptId)?.name || '')}`)}</td>
-        <td><span class="pill ${r.st[2]}">${r.st[1]}</span>${r.l?.live?.on ? `<div class="tiny muted">every ${+r.l.live.every || 10} min since ${hm(r.l.live.since)}</div>` : ''}</td>
-        <td>${r.p ? `<b class="small">${hm(r.p.t)}</b><div class="tiny muted">${agoTxt(r.p.t)}</div>` : '<span class="tiny muted">—</span>'}</td>
-        <td>${where(r)}</td>
-        <td><div class="row" style="gap:6px;flex-wrap:nowrap">${r.p && mapUrl(r.p) ? `<a class="btn sm" href="${esc(mapUrl(r.p))}" target="_blank" rel="noopener">Map</a>` : ''}${r.p ? `<button class="btn sm ghost" data-a="loc-view" data-e="${r.e.id}" data-d="${T}">History</button>` : ''}</div></td></tr>`).join('')}
-    </tbody></table></div>` : empty('Nobody you manage is on WFH or official duty today.'), { list: true })}
-    <p class="tiny muted">Live sharing sends a location every ${liveEvery()} minutes while the employee has OfficeHub open; “Signal lost” means no update for a while (app closed, no network or location turned off). Only the employee’s managers, department head, HR, directors and administrators can see this page’s data.</p>`;
+const LEAFLET = {
+  js: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js', jsSri: 'sha384-NElt3Op+9NBMCYaef5HxeJmU4Xeard/Lku8ek6hoPTvYkQPh3zLIrJP7KiRocsxO',
+  css: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css', cssSri: 'sha384-c6Rcwz4e4CITMbu/NBmnNS8yN2sC3cUElMEMfP3vqqKFp7GOYaaBBCqmaWBjmkjb',
+};
+// the map lives outside the page re-render (which replaces the page's HTML) and is moved back into its slot after each render
+const WFHMAP = { loading: null, failed: false, map: null, el: null, layer: null, marks: new Map(), fitted: '', focus: null };
+
+function wfhRows() {
+  const T = today(), q = ui('wlQ', '').trim().toLowerCase(), dept = ui('wlDept', '');
+  return active().map((e) => { const l = locOf(e.id, T); return { e, l, p: lastPing(l), kind: remoteKind(e.id, T), st: wfhState(l) }; })
+    .filter((r) => (r.kind || r.p || r.l?.live) && (!dept || r.e.deptId === dept)
+      && (!q || `${r.e.name} ${r.e.code || ''} ${deptOf(r.e.deptId)?.name || ''}`.toLowerCase().includes(q)));
 }
-// keep "x min ago" and Live / Signal lost fresh while the page is open
-setInterval(() => { if (S.view === 'attendance' && ui('attTab', '') === 'live') schedule(); }, 30000);
+function wfhSharing(rows) {
+  const show = ui('wlShow', 'active');
+  return rows.filter((r) => (show === 'live' ? r.st === 'live' : show === 'outdated' ? r.st === 'outdated' : r.st === 'live' || r.st === 'outdated'))
+    .sort((a, b) => (a.st === 'live' ? 0 : 1) - (b.st === 'live' ? 0 : 1) || (b.l.last || 0) - (a.l.last || 0));
+}
+const wfhPlace = (p) => (p ? `${p.addr ? esc(p.addr) : p.lat != null ? `${p.lat}, ${p.lng}` : 'Map link'}${p.acc ? ` <span class="muted">±${p.acc} m</span>` : ''}` : '—');
+
+function vWfhLive() {
+  if (!canSeeLocations()) return shell(empty('Only Admin, HR and Manager accounts can see employees’ WFH locations.'), 'WFH locations');
+  const T = today(), rows = wfhRows(), sharing = wfhSharing(rows);
+  const all = rows.filter((r) => r.st === 'live' || r.st === 'outdated'), others = rows.filter((r) => r.st !== 'live' && r.st !== 'outdated').sort((a, b) => a.e.name.localeCompare(b.e.name));
+  const nLive = all.filter((r) => r.st === 'live').length, nOld = all.length - nLive;
+  const every = liveEvery();
+  const status = (r) => (r.st === 'live' ? '<span class="pill t-ok">Live</span>'
+    : `<span class="pill t-warn">Outdated</span><div class="tiny" style="color:var(--warn)">No update for ${agoTxt(r.l.last).replace(' ago', '')} — last known position, may have moved</div>`);
+  const kpis = [['Live now', nLive, 'ok'], ['Outdated', nOld, nOld ? 'warn' : ''], ['On WFH, not sharing live', others.length, '']];
+  const body = `
+    <div class="filters wfh-filters">
+      <input class="i" id="wl-q" data-i="wlQ" placeholder="Search name, code or department" value="${esc(ui('wlQ', ''))}" aria-label="Search employees">
+      <select class="i" id="wl-dept" data-c="wlDept" aria-label="Department">${deptOpts(ui('wlDept', ''), 'All departments')}</select>
+      <select class="i" id="wl-show" data-c="wlShow" aria-label="Show">${opts([['active', 'Sharing now (live and outdated)'], ['live', 'Live only'], ['outdated', 'Outdated only']], ui('wlShow', 'active'))}</select>
+    </div>
+    <div class="live-kpis">${kpis.map(([l, v, c]) => `<div class="kt" style="cursor:default"><span class="l">${l}</span><span class="v ${c}">${v}</span></div>`).join('')}</div>
+    <section class="card wfh-mapcard"><div id="wfh-map-slot" class="wfh-map" aria-label="Map of employees sharing their location"></div>
+      <div class="wfh-legend tiny"><span><i class="wfh-dot live"></i>Live</span><span><i class="wfh-dot old"></i>Outdated — last known position, may have moved</span></div></section>
+    ${card(`Sharing their location · ${fmtD(T)}`, sharing.length ? `<div class="tbl-wrap"><table class="t live-t"><thead><tr><th>Employee</th><th>Department</th><th>Status</th><th>Last updated</th><th>Location</th><th></th></tr></thead><tbody>
+      ${sharing.map((r) => `<tr class="${r.st === 'outdated' ? 'wfh-old' : ''}"><td>${person(r.e.id, `${r.kind === 'OD' ? 'Official duty' : 'Work from home'}${r.e.code ? ' · ' + esc(r.e.code) : ''}`)}</td>
+        <td class="small">${esc(deptOf(r.e.deptId)?.name || '—')}</td>
+        <td>${status(r)}</td>
+        <td>${r.p ? `<b class="small">${hm(r.p.t)}</b><div class="tiny muted">${agoTxt(r.p.t)}</div>` : '—'}</td>
+        <td class="small">${wfhPlace(r.p)}</td>
+        <td><div class="row" style="gap:6px;flex-wrap:nowrap">${r.p?.lat != null ? `<button class="btn sm" data-a="loc-focus" data-e="${r.e.id}">Show on map</button>` : ''}${r.p && mapUrl(r.p) ? `<a class="btn sm ghost" href="${esc(mapUrl(r.p))}" target="_blank" rel="noopener">Maps</a>` : ''}<button class="btn sm ghost" data-a="loc-view" data-e="${r.e.id}" data-d="${T}">History</button></div></td></tr>`).join('')}
+    </tbody></table></div>` : empty(all.length ? 'Nobody matches these filters.' : 'Nobody is sharing their location right now.'), { list: true })}
+    ${others.length ? card('On WFH / official duty today — not sharing live', `<div class="tbl-wrap"><table class="t"><thead><tr><th>Employee</th><th>Department</th><th>Status</th></tr></thead><tbody>
+      ${others.map((r) => `<tr><td>${person(r.e.id, r.e.code ? esc(r.e.code) : '')}</td><td class="small">${esc(deptOf(r.e.deptId)?.name || '—')}</td><td class="small">${r.st === 'stopped' ? `Stopped sharing at ${hm(r.l.live.stoppedAt)}` : r.st === 'once' ? `Shared once at ${hm(r.p.t)} — not live` : 'Hasn’t shared a location today'}</td></tr>`).join('')}
+    </tbody></table></div>`, { list: true }) : ''}
+    <p class="tiny muted">Employees share only after agreeing to it, and only while OfficeHub is open on their device; positions update every ${every} minutes. “Outdated” means no update for over ${every * 2 + 2} minutes. Only Admin, HR and Manager accounts can see this page — the server sends these locations to nobody else.</p>`;
+  return shell(body, 'WFH locations', `Live locations of employees working from home · updates every ${every} min`);
+}
+
+function loadLeaflet() {
+  if (window.L?.map) return Promise.resolve(window.L);
+  if (WFHMAP.loading) return WFHMAP.loading;
+  WFHMAP.loading = new Promise((ok, bad) => {
+    const css = Object.assign(document.createElement('link'), { rel: 'stylesheet', href: LEAFLET.css, integrity: LEAFLET.cssSri, crossOrigin: 'anonymous' });
+    const js = Object.assign(document.createElement('script'), { src: LEAFLET.js, integrity: LEAFLET.jsSri, crossOrigin: 'anonymous' });
+    js.onload = () => (window.L?.map ? ok(window.L) : bad(new Error('map library')));
+    js.onerror = () => { WFHMAP.loading = null; bad(new Error('map library')); };
+    document.head.append(css, js);
+  });
+  return WFHMAP.loading;
+}
+function wfhAfterRender() {
+  const slot = document.getElementById('wfh-map-slot');
+  if (!slot) return;
+  if (WFHMAP.failed) { slot.innerHTML = '<p class="small muted" style="padding:16px">The map couldn’t load (no connection to the map service). The list below still shows every location.</p>'; return; }
+  if (!WFHMAP.el) { WFHMAP.el = document.createElement('div'); WFHMAP.el.className = 'wfh-map-inner'; }
+  if (WFHMAP.el.parentNode !== slot) slot.appendChild(WFHMAP.el);
+  loadLeaflet().then(drawWfhMap).catch(() => { WFHMAP.failed = true; schedule(); });
+}
+function drawWfhMap(L) {
+  if (!document.getElementById('wfh-map-slot') || !canSeeLocations()) return;
+  if (!WFHMAP.map) {
+    WFHMAP.map = L.map(WFHMAP.el, { scrollWheelZoom: false }).setView([22.5, 80], 4);
+    WFHMAP.map.attributionControl.setPrefix('<a href="https://leafletjs.com" target="_blank" rel="noopener">Leaflet</a>');
+    // the map service only learns the page's origin, never the page address
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors', referrerPolicy: 'strict-origin-when-cross-origin' }).addTo(WFHMAP.map);
+    WFHMAP.layer = L.layerGroup().addTo(WFHMAP.map);
+  }
+  WFHMAP.map.invalidateSize();
+  WFHMAP.layer.clearLayers(); WFHMAP.marks.clear();
+  const rows = wfhSharing(wfhRows()).filter((r) => r.p?.lat != null);
+  for (const r of rows) {
+    const live = r.st === 'live', pos = [r.p.lat, r.p.lng];
+    if (live && r.p.acc) L.circle(pos, { radius: r.p.acc, color: '#16a34a', weight: 1, fillOpacity: 0.08, interactive: false }).addTo(WFHMAP.layer);
+    const m = L.circleMarker(pos, live ? { radius: 9, color: '#0b7a4b', weight: 2, fillColor: '#22c55e', fillOpacity: 0.95 } : { radius: 8, color: '#6b7280', weight: 2, dashArray: '3 3', fillColor: '#d1d5db', fillOpacity: 0.7 })
+      .bindTooltip(`${esc(r.e.name)} · ${live ? 'Live' : 'Outdated'}`)
+      .bindPopup(`<b>${esc(r.e.name)}</b><br>${esc(deptOf(r.e.deptId)?.name || '')}<br>${live ? '<span style="color:#15803d;font-weight:600">Live</span>' : '<span style="color:#b45309;font-weight:600">Outdated — last known position</span>'}<br>Updated ${hm(r.p.t)} (${agoTxt(r.p.t)})${r.p.acc ? `<br>Accurate to ±${r.p.acc} m` : ''}${r.p.addr ? `<br>${esc(r.p.addr)}` : ''}`)
+      .addTo(WFHMAP.layer);
+    if (!live) m.bringToBack();
+    WFHMAP.marks.set(r.e.id, m);
+  }
+  // zoom to fit when the set of people changes — not on every refresh, so the viewer's own zoom stays put
+  const key = rows.map((r) => r.e.id).sort().join(',');
+  if (rows.length && key !== WFHMAP.fitted) { WFHMAP.map.fitBounds(L.latLngBounds(rows.map((r) => [r.p.lat, r.p.lng])).pad(0.3), { maxZoom: 15 }); WFHMAP.fitted = key; }
+  if (WFHMAP.focus) { const m = WFHMAP.marks.get(WFHMAP.focus); if (m) { WFHMAP.map.setView(m.getLatLng(), 16); m.openPopup(); } WFHMAP.focus = null; }
+}
+// keep "x min ago", Live / Outdated and the map current while the dashboard is open (new positions arrive by sync)
+setInterval(() => { if (S.view === 'wfhlive') schedule(); }, 30000);
 
 /* manager alert */
 function locAlertCount(ids, d) {
+  if (!canSeeLocations()) return 0; // without access to others' locations, “not shared” can’t be told apart
   if ((cfg().wfhLoc || 'required') === 'off') return 0;
   const [h, m] = (cfg().shift?.start || '09:30').split(':').map(Number);
   const now = new Date(); if (now.getHours() * 60 + now.getMinutes() < h * 60 + m + 30) return 0;
@@ -2696,6 +2787,11 @@ function locAlertCount(ids, d) {
 .consent-list{padding-left:18px;margin:0 0 12px;display:grid;gap:6px}
 .live-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:14px}
 .live-t td{vertical-align:top}
+.wfh-filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}.wfh-filters .i{flex:1 1 180px;min-width:0}
+.wfh-mapcard{padding:0;overflow:hidden;margin-bottom:14px}.wfh-map{height:420px;background:var(--sunk)}.wfh-map-inner{height:100%;width:100%}
+.wfh-legend{display:flex;flex-wrap:wrap;gap:14px;padding:8px 12px;border-top:1px solid var(--line)}.wfh-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}.wfh-dot.live{background:#22c55e;border:2px solid #0b7a4b}.wfh-dot.old{background:#d1d5db;border:2px dashed #6b7280}
+tr.wfh-old td{background:color-mix(in srgb,var(--warn) 6%,transparent)}tr.wfh-old .avatar,tr.wfh-old .av{filter:grayscale(1);opacity:.7}
+@media (max-width:520px){.wfh-map{height:300px}}
 @media (max-width:520px){.live-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--sunk);border-radius:999px;padding:3px 4px 3px 10px;font-size:13px}
 .chip-x{border:0;background:transparent;color:var(--muted);cursor:pointer;border-radius:50%;width:22px;height:22px;font-size:11px}
@@ -4058,7 +4154,7 @@ function vSignup() {
 
 <script>
 /* ═════════════ Render loop ═════════════ */
-const VIEW_FN = { dashboard: vDashboard, chats: vChats2, attendance: vAttendance, leave: vLeave, tasks: vTasks, worklog: vWorklog, approvals: vApprovals, claims: vClaims, departments: vDepartments, people: vPeople, reports: vReports, settings: vSettings };
+const VIEW_FN = { dashboard: vDashboard, chats: vChats2, attendance: vAttendance, wfhlive: vWfhLive, leave: vLeave, tasks: vTasks, worklog: vWorklog, approvals: vApprovals, claims: vClaims, departments: vDepartments, people: vPeople, reports: vReports, settings: vSettings };
 let raf = 0, viewChanged = true;
 function schedule() { if (!raf) raf = requestAnimationFrame(() => { raf = 0; render(); }); }
 function morph(root, html, fresh = false) {
@@ -4088,6 +4184,7 @@ function render() {
   const html = !S.me ? vSetup() : authed === true ? VIEW_FN[S.view]() : vLogin();
   morph($('#app'), html, viewChanged);
   if (authed === true && S.view === 'chats') chatAfterRender(prevChatScroll);
+  if (authed === true && S.view === 'wfhlive') wfhAfterRender();
   if (viewChanged) window.scrollTo(0, 0);
   viewChanged = false;
   if (M) { if (authed === true) drawModal(false); else closeModal(); }

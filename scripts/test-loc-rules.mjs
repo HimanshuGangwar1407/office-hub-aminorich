@@ -1,16 +1,10 @@
 // Tests who may read and write WFH / official-duty location records (server/loc-rules.js). Run: node scripts/test-loc-rules.mjs
 import assert from 'node:assert/strict';
-import { locEmpOf, locVisible, locWriteProblem, teamOf, seesAllLocations, locScope, LIVE_STOPPED } from '../server/loc-rules.js';
+import { locEmpOf, locVisible, locWriteProblem, seesAllLocations, LOCATION_VIEWER_ROLES, LIVE_STOPPED } from '../server/loc-rules.js';
 
-// DIR heads Sales; MGR reports to DIR; EMP and EMP2 report to MGR; OTHER is in Ops with no manager link.
-const emps = [
-  { id: 'DIR', managerId: null, deptId: 'ops' }, { id: 'MGR', managerId: 'DIR', deptId: 'sales' },
-  { id: 'EMP', managerId: 'MGR', deptId: 'sales' }, { id: 'EMP2', managerId: 'MGR', deptId: 'sales' },
-  { id: 'OTHER', managerId: null, deptId: 'ops' }, { id: 'HEADED', managerId: null, deptId: 'mkt' },
-];
-const depts = [{ id: 'mkt', headId: 'EMP2' }];
+// Only Admin, HR and Manager accounts see other people's locations; everyone sees their own.
 const as = (empId, role = 'EMPLOYEE', extra = {}) => ({ empId, role, active: true, ...extra });
-const can = (s, owner) => locVisible(`loc/${owner}_2026-10-13`, s, teamOf(s.empId, emps, depts));
+const can = (s, owner) => locVisible(`loc/${owner}_2026-10-13`, s);
 const rec = (empId, o = {}) => ({ empId, date: '2026-10-13', kind: 'WFH', last: 1, pings: [{ t: 1, lat: 1, lng: 2 }], ...o });
 
 let n = 0;
@@ -30,23 +24,20 @@ test('everyone sees their own location', () => {
 test('colleagues cannot see each other’s location', () => {
   assert.equal(can(as('EMP'), 'EMP2'), false);
   assert.equal(can(as('OTHER'), 'EMP'), false);
-  assert.equal(can(as('EMP'), 'MGR'), false, 'reports cannot see their manager');
 });
 
-test('managers see their reports at every level; department heads see their department', () => {
-  assert.equal(can(as('MGR'), 'EMP'), true);
-  assert.equal(can(as('DIR'), 'EMP'), true, 'manager’s manager');
-  assert.equal(can(as('DIR'), 'OTHER'), false);
-  assert.equal(can(as('EMP2'), 'HEADED'), true, 'department head');
-  assert.equal(can(as('EMP2'), 'EMP'), false);
+test('Admin, HR and Manager accounts see everyone’s; nobody else does', () => {
+  assert.deepEqual(LOCATION_VIEWER_ROLES, ['ADMIN', 'HR', 'MANAGER']);
+  for (const role of ['ADMIN', 'HR', 'MANAGER']) assert.equal(can(as('X', role), 'EMP'), true, role);
+  assert.equal(can(as('DIR', 'DIRECTOR'), 'EMP'), false, 'directors');
+  assert.equal(can(as('LEAD', 'EMPLOYEE'), 'EMP'), false, 'a team lead whose role is Employee');
+  assert.equal(seesAllLocations({ bootstrap: true }), true, 'first-time setup (the owner)');
 });
 
-test('HR, admins and directors see everyone; inactive accounts see nothing', () => {
-  for (const role of ['HR', 'ADMIN', 'DIRECTOR']) assert.equal(can(as('OTHER', role), 'EMP'), true, role);
+test('inactive accounts see nothing — not even with a viewer role', () => {
   assert.equal(can(as('EMP', 'EMPLOYEE', { active: false }), 'EMP'), false);
-  assert.equal(can(as('OTHER', 'ADMIN', { active: false }), 'EMP'), false);
-  assert.equal(seesAllLocations({ bootstrap: true }), true);
-  assert.equal(seesAllLocations(as('MGR', 'MANAGER')), false);
+  for (const role of ['ADMIN', 'HR', 'MANAGER']) assert.equal(can(as('X', role, { active: false }), 'EMP'), false, role);
+  assert.equal(can(null, 'EMP'), false);
 });
 
 test('only the employee can write their own location records', () => {
@@ -77,13 +68,6 @@ test('a stopped sharing run cannot switch itself back on; a new Start can', () =
   assert.equal(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('EMP', { live: { on: true, since: 5, every: 10, consentAt: 4, run: 'r1' } }), stopped, as('EMP')), LIVE_STOPPED);
   assert.equal(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('EMP', { live: { on: true, since: 3, every: 10, consentAt: 3, run: 'r2' } }), stopped, as('EMP')), null, 'new run, even with an earlier clock');
   assert.equal(locWriteProblem('update', 'loc/EMP_2026-10-13', { last: 10 }, stopped, as('EMP')), null, 'other changes are fine');
-});
-
-test('the visibility signature changes when someone’s team changes', () => {
-  const a = locScope(as('MGR'), teamOf('MGR', emps, depts));
-  const b = locScope(as('MGR'), teamOf('MGR', emps.filter((e) => e.id !== 'EMP2'), depts));
-  assert.notEqual(a, b);
-  assert.equal(locScope(as('X', 'HR'), new Set()), 'all');
 });
 
 console.log(`\n${n} tests passed`);

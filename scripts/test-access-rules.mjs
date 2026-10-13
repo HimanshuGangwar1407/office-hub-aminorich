@@ -47,8 +47,8 @@ test('inactive accounts read nothing', () => {
 });
 test('the usual WFH (home) location is only sent to people who may see that employee’s locations', () => {
   const e = rows.find((r) => r.path === 'emp/EMP').data;
-  for (const A of [emp, mgr, hr, dir]) assert.deepEqual(shapeDoc('emp/EMP', e, A).wfhLoc, e.wfhLoc, A.s.empId);
-  for (const A of [other, head, S('EMP2')]) { const d = shapeDoc('emp/EMP', e, A); assert.equal('wfhLoc' in d, false, A.s.empId); assert.equal(d.name, 'Emp'); }
+  for (const A of [emp, mgr, hr, S('ADM', 'ADMIN'), S('MGR2', 'MANAGER')]) assert.deepEqual(shapeDoc('emp/EMP', e, A).wfhLoc, e.wfhLoc, A.s.empId);
+  for (const A of [other, head, dir, S('EMP2')]) { const d = shapeDoc('emp/EMP', e, A); assert.equal('wfhLoc' in d, false, A.s.empId); assert.equal(d.name, 'Emp'); }
 });
 test('notifications: only the recipient reads or changes them; anyone may notify, in their own name', () => {
   const nt = { to: 'EMP', from: 'MGR', body: 'Home, Zoo Road' };
@@ -98,7 +98,8 @@ test('employee records: people change only their own preferences and usual WFH l
   assert.notEqual(empWriteProblem('update', 'emp/EMP', { prefs: { email: false } }, e, other), null, 'someone else’s');
   assert.notEqual(empWriteProblem('update', 'emp/EMP', { wfhLoc: null }, e, other), null);
   assert.equal(empWriteProblem('update', 'emp/EMP', { wfhLoc: null }, e, mgr), null, 'manager resets a report’s usual location');
-  assert.equal(empWriteProblem('update', 'emp/EMP', { wfhLoc: null }, e, dir), null);
+  assert.notEqual(empWriteProblem('update', 'emp/EMP', { wfhLoc: null }, e, dir), null, 'directors no longer see locations');
+  assert.equal(empWriteProblem('update', 'emp/EMP', { wfhLoc: null }, e, S('MGR2', 'MANAGER')), null, 'any Manager account');
   assert.notEqual(empWriteProblem('update', 'emp/EMP', { wfhLoc: { lat: 9, lng: 9 } }, e, mgr), null, 'but not set it');
   assert.notEqual(empWriteProblem('delete', 'emp/EMP', undefined, e, emp), null);
 });

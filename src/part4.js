@@ -26,7 +26,7 @@ const ui = (k, d) => (S.ui[k] ?? d);
 
 /* ═════════════ Shell ═════════════ */
 const VIEWS = [
-  ['dashboard', 'Dashboard', () => true], ['chats', 'Chats', () => canView('chats')], ['attendance', 'Attendance', () => canView('attendance')], ['leave', 'Leave', () => canView('leave')], ['tasks', 'Tasks', () => canView('tasks')],
+  ['dashboard', 'Dashboard', () => true], ['chats', 'Chats', () => canView('chats')], ['attendance', 'Attendance', () => canView('attendance')], ['wfhlive', 'WFH locations', () => canSeeLocations()], ['leave', 'Leave', () => canView('leave')], ['tasks', 'Tasks', () => canView('tasks')],
   ['worklog', 'Work log', () => canView('worklog')], ['approvals', 'Approvals', () => canView('approvals')], ['claims', 'Claims', () => canView('claims')], ['departments', 'Departments', () => canView('departments')],
   ['people', 'People', () => canView('people', isManager)], ['reports', 'Reports', () => canView('reports', isManager)], ['settings', 'Settings', () => canView('settings', isHR)],
 ];
@@ -34,6 +34,7 @@ const ICON = {
   dashboard: 'M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z',
   chats: 'M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H10l-4 3v-3H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z',
   attendance: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2',
+  wfhlive: 'M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11zM12 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z',
   leave: 'M4 6h16v14H4zM4 10h16M8 3v4M16 3v4M9 14l6 4M15 14l-6 4',
   tasks: 'M9 11l2 2 4-4M5 4h14v16H5z',
   worklog: 'M6 3h10l3 3v15H6zM9 9h6M9 13h6M9 17h4',
@@ -46,8 +47,8 @@ const ICON = {
   more: 'M5 12h.01M12 12h.01M19 12h.01',
 };
 const ico = (k) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICON[k] || ICON.more}"/></svg>`;
-const SEC = { dashboard: 'teal', chats: 'sky', attendance: 'blue', leave: 'violet', tasks: 'amber', worklog: 'leaf', approvals: 'coral', claims: 'gold', departments: 'indigo', people: 'rose', reports: 'cyan', settings: 'slate' };
-const NAV_GROUPS = [['Workspace', ['dashboard', 'chats', 'attendance', 'leave', 'tasks', 'worklog']], ['Requests', ['approvals', 'claims']], ['Organisation', ['departments', 'people', 'reports', 'settings']]];
+const SEC = { dashboard: 'teal', chats: 'sky', attendance: 'blue', wfhlive: 'sky', leave: 'violet', tasks: 'amber', worklog: 'leaf', approvals: 'coral', claims: 'gold', departments: 'indigo', people: 'rose', reports: 'cyan', settings: 'slate' };
+const NAV_GROUPS = [['Workspace', ['dashboard', 'chats', 'attendance', 'wfhlive', 'leave', 'tasks', 'worklog']], ['Requests', ['approvals', 'claims']], ['Organisation', ['departments', 'people', 'reports', 'settings']]];
 const MOBILE_NAV = ['dashboard', 'attendance', 'tasks', 'approvals'];
 function shell(content, title, sub, actions = '') {
   const inbox = myInbox().length, unread = S.ntf.filter((n) => !n.read).length, chatUnread = unreadCount();
@@ -188,12 +189,11 @@ function vDashboard() {
 /* ═════════════ Attendance ═════════════ */
 function vAttendance() {
   const mgr = isManager(), tab = ui('attTab', mgr ? 'today' : 'mine');
-  const tabs = [['today', 'Daily board', mgr], ['live', 'Live locations', mgr], ['mine', 'My attendance', true], ['register', 'Monthly register', mgr], ['salary', 'Salary sheet', canSalary()], ['import', 'Import machine report', isHR()]].filter((t) => t[2]);
+  const tabs = [['today', 'Daily board', mgr], ['mine', 'My attendance', true], ['register', 'Monthly register', mgr], ['salary', 'Salary sheet', canSalary()], ['import', 'Import machine report', isHR()]].filter((t) => t[2]);
   let body = `<div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button class="tab" role="tab" aria-selected="${tab === k}" data-a="ui" data-k="attTab" data-v="${k}">${l}</button>`).join('')}</div>`;
   const T = today();
   if (tab === 'mine') body += monthView(S.me, ui('attMonth', T.slice(0, 7)));
   if (tab === 'salary') body += canSalary() ? vSalary() : '';
-  if (tab === 'live' && mgr) body += vLiveLocations();
   if (tab === 'today') {
     const d = ui('attDate', T), dept = ui('attDept', '');
     const rows = scope().map(empById).filter((e) => e && (!dept || e.deptId === dept)).sort((a, b) => a.name.localeCompare(b.name)).map((e) => ({ e, s: dayStatus(e, d) }));

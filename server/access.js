@@ -6,11 +6,11 @@
 //    direct and group chats (and their messages) only for their members.
 //  - employee records: the usual work-from-home location (wfhLoc) is only sent to people who may see that
 //    employee's locations; non-HR users may only change their own preferences and usual WFH location
-//    (and managers may reset a report's usual WFH location).
+//    (and Admin / HR / Manager accounts may reset someone's usual WFH location).
 //  - notifications: only the recipient reads or changes them.  mail log: HR, and each person their own.
 //  - files (blob/*): readable when you may read a chat message or location record that uses the file;
 //    changed or deleted only by the uploader, a group admin deleting the group's files, or HR.
-import { teamOf, seesAllLocations, locVisible } from './loc-rules.js';
+import { seesAllLocations, locVisible } from './loc-rules.js';
 import { isGroupAdmin } from './chat-rules.js';
 
 const MGMT = ['ADMIN', 'HR', 'DIRECTOR'];
@@ -27,8 +27,7 @@ export function buildCtx(rows) {
     else if (c === 'chat' && id && !more) chats.set(id, data);
     else if (path === 'cfg/main') depts = Array.isArray(data.depts) ? data.depts : [];
   }
-  const empList = [...emps].map(([id, e]) => ({ id, managerId: e.managerId || null, deptId: e.deptId || null }));
-  return { emps, chats, depts, empList };
+  return { emps, chats, depts };
 }
 
 const hash = (str) => { let h = 0; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
@@ -38,7 +37,6 @@ export function accessFor(s, ctx) {
   const active = !!s?.bootstrap || !!s?.active;
   const all = seesAllLocations(s);
   const mgmt = !!s?.bootstrap || (active && MGMT.includes(s?.role));
-  const team = all || !s?.empId ? new Set() : teamOf(s.empId, ctx.empList, ctx.depts);
   const myDept = ctx.emps.get(s?.empId)?.deptId || null;
   const heads = new Set(ctx.depts.filter((d) => d && d.headId && d.headId === s?.empId).map((d) => d.id));
   function chatOk(id) {
@@ -49,13 +47,13 @@ export function accessFor(s, ctx) {
     if (!c) return false;
     return (c.members || []).includes(s.empId) || (c.kind === 'group' && (c.admins || [c.createdBy]).includes(s.empId));
   }
-  const seesEmpLoc = (empId) => all || empId === s?.empId || team.has(empId);
+  const seesEmpLoc = (empId) => all || empId === s?.empId;
   // chats whose membership can change while they already have messages (groups, departments): when this list
   // changes, the browser must reload its copy so it gets — or drops — their older messages
   const shared = [...ctx.chats.keys()].filter((id) => !id.startsWith('dm-') && id !== 'all' && chatOk(id));
   for (const d of ctx.depts) if (d?.id && chatOk('dept-' + d.id)) shared.push('dept-' + d.id);
-  const sig = `${all ? 'all' : 't' + team.size + '.' + hash([...team].sort().join(','))}.c${hash([...new Set(shared)].sort().join(','))}`;
-  return { s, ctx, active, all, mgmt, team, chatOk, seesEmpLoc, sig };
+  const sig = `${all ? 'all' : 'own'}.c${hash([...new Set(shared)].sort().join(','))}`;
+  return { s, ctx, active, all, mgmt, chatOk, seesEmpLoc, sig };
 }
 
 /** Can this record be sent to the session? `data` is null for deleted records. (Files are checked separately.) */
@@ -66,7 +64,7 @@ export function canReadDoc(path, data, A) {
   if (c === 'auth') return false;
   if (c === 'data') return a === 'users' && b === s.uid;
   if (c === 'pay' || c === 'payroll' || c === 'fines') return !!s.salary;
-  if (c === 'loc') return locVisible(path, s, A.team);
+  if (c === 'loc') return locVisible(path, s);
   if (c === 'chat') return A.chatOk(a);
   if (c === 'ntf') return !data || data.to === s.empId;
   if (c === 'mail') return !data || !!s.hr || data.empId === s.empId;
@@ -93,7 +91,7 @@ export function empWriteProblem(op, path, data, old, A) {
   const keys = changedKeys(next, old);
   if (!keys.length) return null;
   if (id === A.s.empId) return keys.every((k) => SELF_EDITABLE.has(k)) ? null : 'Only HR can change that part of your record.';
-  // managers may reset a report's usual WFH location (it is set again at the next check-in)
+  // Admin / HR / Manager accounts may reset someone's usual WFH location (it is set again at the next check-in)
   if (keys.length === 1 && keys[0] === 'wfhLoc' && next.wfhLoc == null && A.seesEmpLoc(id)) return null;
   return 'Only HR can change someone else’s record.';
 }
