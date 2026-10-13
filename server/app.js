@@ -2,9 +2,12 @@
 import { q, getPool, ensureSchema, writeDoc, getDoc, parentOf } from './db.js';
 import { sessionFrom, hashPassword, checkPassword, passwordProblem, newUid, makeToken, cookieHeader, safeEqual } from './auth.js';
 import { chatWriteProblem, clearedChatsProblem } from './chat-rules.js';
+import { locWriteProblem, LIVE_STOPPED } from './loc-rules.js';
+import { buildCtx, accessFor, canReadDoc, shapeDoc, empWriteProblem, chatAccessProblem, ntfWriteProblem, mailWriteProblem, blobReadable, blobWriteProblem, refUsesFile } from './access.js';
 
 const SALARY = new Set(['pay', 'payroll', 'fines']);
-const PROTECTED_EMP = ['role', 'userId', 'active', 'status', 'code', 'email'];
+// managerId and deptId decide who may see someone's WFH locations (server/loc-rules.js), so only HR may change them
+const PROTECTED_EMP = ['role', 'userId', 'active', 'status', 'code', 'email', 'managerId', 'deptId'];
 const PATH_RE = /^[A-Za-z0-9_\-.~:@+]{1,200}(\/[A-Za-z0-9_\-.~:@+]{1,200}){1,14}$/;
 const MAX_DOC = 900 * 1024;
 const H12 = 12 * 3600000, D7 = 7 * 24 * 3600000;
@@ -13,19 +16,50 @@ const fail = (status, code, message) => { throw Object.assign(new Error(message)
 const lower = (s) => String(s || '').trim().toLowerCase();
 const isDocPath = (p) => PATH_RE.test(p) && p.split('/').length % 2 === 0;
 
-function canRead(path, s) {
-  const [c, a, b] = path.split('/');
-  if (c === 'auth') return false;
-  if (c === 'data') return a === 'users' && b === s.uid;
-  if (SALARY.has(c)) return s.salary;
-  return true;
+// Who sees what depends on the employee records, the department list and chat membership (server/access.js).
+// Employees and settings change rarely: they are cached per server instance and re-read when their latest version or
+// count changes, and at least once a minute. Chat membership is read fresh every time (only the few fields needed),
+// because new messages update the chat records constantly and that must not force re-reading everything.
+let empCache = { stamp: null, at: 0, rows: null };
+async function accessContext() {
+  const [st, chats] = await Promise.all([
+    q(`SELECT parent, max(v)::text AS v, count(*)::int AS n FROM docs WHERE parent IN ('emp', 'cfg') GROUP BY parent ORDER BY parent`),
+    q(`SELECT path, data->>'kind' AS kind, data->'members' AS members, data->'admins' AS admins, data->>'createdBy' AS "createdBy" FROM docs WHERE parent = 'chat' AND NOT deleted`),
+  ]);
+  const stamp = st.rows.map((r) => `${r.parent}:${r.v}:${r.n}`).join('|');
+  if (!empCache.rows || empCache.stamp !== stamp || empCache.at < Date.now() - 60000) {
+    empCache = { stamp, at: Date.now(), rows: (await q(`SELECT path, data FROM docs WHERE (parent = 'emp' OR path = 'cfg/main') AND NOT deleted`)).rows };
+  }
+  const chatRows = chats.rows.map((r) => ({ path: r.path, data: { kind: r.kind, members: r.members || [], admins: r.admins || undefined, createdBy: r.createdBy || undefined } }));
+  return buildCtx([...empCache.rows, ...chatRows]);
+}
+const accessOf = async (s) => accessFor(s, await accessContext());
+
+// The chat messages and location records that use a shared file (blob/{fid}_{i}): only those written by the person who
+// uploaded the file count (refUsesFile). A file is readable when one of them is. Paths are cached for 30 seconds.
+const refCache = new Map();
+const fidOf = (path, data) => String(data?.fid || path.split('/')[1]?.replace(/_\d+$/, '') || '');
+async function blobRefs(fid, by) {
+  if (!/^[A-Za-z0-9]{4,64}$/.test(fid) || !by) return [];
+  const key = `${fid}|${by}`, hit = refCache.get(key);
+  if (hit && hit.at > Date.now() - 30000) return hit.paths;
+  const rows = (await q(`SELECT path, data FROM docs WHERE NOT deleted AND ((parent = 'loc' AND data->>'empId' = $2) OR (parent LIKE 'chat/%/b' AND data->>'by' = $2)) AND data::text LIKE $1 LIMIT 50`, [`%"${fid}"%`, by])).rows;
+  const paths = rows.filter((r) => refUsesFile(r.path, r.data, fid, by)).map((r) => r.path);
+  if (refCache.size > 5000) refCache.clear();
+  refCache.set(key, { at: Date.now(), paths });
+  return paths;
 }
 
-function checkWrite(op, path, data, old, s) {
+async function checkWrite(op, path, data, old, s, A) {
   const [c, a, b] = path.split('/');
   const no = (m) => fail(403, 'permission_denied', m || 'You don’t have permission to change this.');
   if (!s.active) no('Your account is not active. Ask HR.');
   if (c === 'auth') no();
+  if (c === 'loc') { const bad = locWriteProblem(op, path, data, old, s); if (bad === LIVE_STOPPED) fail(409, 'live_stopped', bad); if (bad) no(bad); return; }
+  if (c === 'chat') { const bad = chatAccessProblem(op, path, data, old, A); if (bad) no(bad); return; }
+  if (c === 'ntf') { const bad = ntfWriteProblem(op, data, old, s); if (bad) no(bad); return; }
+  if (c === 'mail') { const bad = mailWriteProblem(op, data, old, A); if (bad) no(bad); return; }
+  if (c === 'blob') { const bad = blobWriteProblem(op, data, old, old && old.by !== s.empId ? await blobRefs(fidOf(path, old), old.by) : [], A); if (bad) no(bad); return; }
   if (c === 'data') {
     if (!(a === 'users' && b === s.uid)) no();
     if (path === `data/users/${s.uid}/cleared`) { const bad = clearedChatsProblem(op, data, old); if (bad) fail(400, 'invalid_argument', bad); }
@@ -44,7 +78,8 @@ function checkWrite(op, path, data, old, s) {
     if (next && (next.userId || '') !== (old?.userId || '') && !(s.bootstrap && !old && next.userId === s.uid)) no('Logins are linked when the employee creates their account.');
     if (s.hr || s.bootstrap) return;
     if (!old || op === 'delete') no('Only HR can add or remove employees.');
-    for (const k of PROTECTED_EMP) if (JSON.stringify(next[k] ?? null) !== JSON.stringify(old[k] ?? null)) no('Only HR can change role, code, email or status.');
+    for (const k of PROTECTED_EMP) if (JSON.stringify(next[k] ?? null) !== JSON.stringify(old[k] ?? null)) no('Only HR can change role, code, email, status, manager or department.');
+    const bad = empWriteProblem(op, path, data, old, A); if (bad) no(bad);
   }
 }
 
@@ -175,12 +210,13 @@ const routes = {
     const r = await q(
       `SELECT path, data, v, deleted, at > now() - interval '5 seconds' AS fresh FROM docs
        WHERE v > $1 AND parent NOT LIKE 'blob%' ${since ? '' : 'AND NOT deleted'} ORDER BY v LIMIT 4000`, [since]);
-    const docs = [];
+    // built after reading the batch, so a chat created just before it is already known
+    const docs = [], A = await accessOf(s);
     let next = since, stop = false;
     for (const row of r.rows) {
       if (row.fresh) stop = true;
       if (!stop) next = Number(row.v);
-      if (canRead(row.path, s)) docs.push(row.deleted ? { p: row.path, v: Number(row.v), x: 1 } : { p: row.path, v: Number(row.v), d: row.data });
+      if (canReadDoc(row.path, row.deleted ? null : row.data, A)) docs.push(row.deleted ? { p: row.path, v: Number(row.v), x: 1 } : { p: row.path, v: Number(row.v), d: shapeDoc(row.path, row.data, A) });
     }
     // presence ("online now", "typing…") for chat
     const now = Date.now(), peer = String(req.body?.peer || '').slice(0, 64);
@@ -189,16 +225,17 @@ const routes = {
       if (Math.random() < 0.05) q('DELETE FROM presence WHERE at < $1', [now - 3600000]).catch(() => {});
     }
     const peers = (await q('SELECT peer, uid, state, at FROM presence WHERE at > $1', [now - 75000])).rows.map((p) => ({ peer: p.peer, by: p.uid, presence: p.state || {}, at: Number(p.at) }));
-    return { docs, next, more: r.rows.length === 4000, scope: `${s.uid}:${s.salary ? 'S' : ''}`, peers };
+    return { docs, next, more: r.rows.length === 4000, scope: `${s.uid}:${s.salary ? 'S' : ''}:${A.sig}`, peers };
   },
   'GET doc': async (req) => {
     const s = await needSession(req);
     // Not "path": on Vercel the /api/* rewrite already sets path=doc, so a second path= becomes ambiguous.
     const path = String(req.query.p || '');
     if (!isDocPath(path)) fail(400, 'invalid_argument', 'Bad path.');
-    if (!canRead(path, s)) return { exists: false };
-    const d = await getDoc(path);
-    return d ? { exists: true, data: d.data, v: d.v } : { exists: false };
+    const A = await accessOf(s), d = await getDoc(path);
+    if (path.startsWith('blob/')) return d && blobReadable(d.data, await blobRefs(fidOf(path, d.data), d.data?.by), A) ? { exists: true, data: d.data, v: d.v } : { exists: false };
+    if (!canReadDoc(path, d?.data ?? null, A)) return { exists: false };
+    return d ? { exists: true, data: shapeDoc(path, d.data, A), v: d.v } : { exists: false };
   },
   'POST write': async (req) => {
     const s = await needSession(req);
@@ -207,7 +244,7 @@ const routes = {
     if (op !== 'delete' && (typeof data !== 'object' || !data || Array.isArray(data))) fail(400, 'invalid_argument', 'Bad data.');
     if (op !== 'delete' && JSON.stringify(data).length > MAX_DOC) fail(413, 'too_large', 'That record is too large.');
     const old = (await getDoc(path))?.data || null;
-    checkWrite(op, path, data, old, s);
+    await checkWrite(op, path, data, old, s, await accessOf(s));
     const parts = path.split('/');
     const parent = parts[0] === 'chat' && parts.length === 4 ? (await getDoc(`chat/${parts[1]}`))?.data || null : null;
     const chatBad = chatWriteProblem(op, path, data, old, s, parent);

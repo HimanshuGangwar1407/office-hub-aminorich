@@ -2,9 +2,11 @@
 /* ═════════════ Location sharing for WFH / official duty ═════════════
    Storage: loc/{empId}_{date} = { empId, date, kind, last, pings:[{ t, src, lat, lng, acc, link, addr, photo, mode }] }
    src: 'gps' (device location), 'live-gps' (auto-update while the app is open), 'link' (Maps pin link / coordinates),
-        'live' (a Google Maps live-location-sharing link — it keeps moving on the map by itself). */
-const LOC = { live: false, timer: null, lastErr: '' };
-const LOC_EVERY_MIN = 15;
+        'live' (a Google Maps live-location-sharing link — it keeps moving on the map by itself).
+   Live sharing: live = { on, since, every (minutes), consentAt, stoppedAt } on the day's record. Only the employee can
+   write their records and only they, their managers / department head, HR, directors and admins can read them (server/loc-rules.js). */
+const LOC = { live: false, timer: null, lastErr: '', since: 0, consentAt: 0, day: '', lastTick: 0, busy: false };
+const liveEvery = () => Math.min(60, Math.max(2, Math.round(+cfg().liveEveryMin || 10))); // minutes between live updates
 const locOf = (empId, d) => S.locs.find((l) => l.empId === empId && l.date === d);
 const lastPing = (l) => l?.pings?.[l.pings.length - 1] || null;
 const punchMode = () => (punchesOn(S.me.id, today()).length % 2 === 0 ? 'in' : 'out');
@@ -33,38 +35,155 @@ function awayFromHome(empId, p) {
 }
 const SRC_LABEL = { gps: 'Device location', 'live-gps': 'Auto-update', link: 'Map pin', live: 'Live link' };
 
-function tryGps() {
+function tryGps(fresh) { // fresh: live updates must not reuse a cached position
   return new Promise((res) => {
     if (!navigator.geolocation) return res({ err: 'This browser can’t share location.' });
     const done = setTimeout(() => res({ err: 'Location took too long to arrive.' }), 12000);
     try {
       navigator.geolocation.getCurrentPosition(
         (p) => { clearTimeout(done); res({ lat: +p.coords.latitude.toFixed(6), lng: +p.coords.longitude.toFixed(6), acc: Math.round(p.coords.accuracy || 0) }); },
-        (e) => { clearTimeout(done); res({ err: e?.code === 1 ? 'Location access is blocked in this window.' : 'Your location couldn’t be found.' }); },
-        { enableHighAccuracy: true, timeout: 11000, maximumAge: 60000 });
-    } catch { clearTimeout(done); res({ err: 'Location access is blocked in this window.' }); }
+        (e) => { clearTimeout(done); res({ err: e?.code === 1 ? 'Location access is blocked in this window.' : 'Your location couldn’t be found.', denied: e?.code === 1 }); },
+        { enableHighAccuracy: true, timeout: 11000, maximumAge: fresh ? 0 : 60000 });
+    } catch { clearTimeout(done); res({ err: 'Location access is blocked in this window.', denied: true }); }
   });
 }
 
-async function addPing(empId, d, ping) {
-  const cur = locOf(empId, d);
-  const pings = [...(cur?.pings || []), ping].slice(-60);
-  await put(`loc/${empId}_${d}`, { empId, date: d, kind: remoteKind(empId, d) || cur?.kind || '', last: ping.t, pings });
-  S.locs = [...S.locs.filter((l) => l !== cur), { id: `${empId}_${d}`, empId, date: d, last: ping.t, pings }];
+// live: undefined keeps the day's live-sharing state as it is; an object replaces it
+const LOC_MAX_PINGS = 150;
+async function addPing(empId, d, ping, live) {
+  const cur = locOf(empId, d), id = `${empId}_${d}`;
+  const pings = [...(cur?.pings || []), ping];
+  // live updates are frequent: drop the oldest of those first, so check-in / check-out and manual shares are always kept
+  while (pings.length > LOC_MAX_PINGS) { const i = pings.findIndex((p, k) => p.src === 'live-gps' && k < pings.length - 1); pings.splice(i >= 0 ? i : 0, 1); }
+  const keep = live !== undefined ? live : cur?.live;
+  const doc = { empId, date: d, kind: remoteKind(empId, d) || cur?.kind || '', last: ping.t, pings, ...(keep ? { live: keep } : {}) };
+  await put(`loc/${id}`, doc);
+  S.locs = [...S.locs.filter((l) => l !== cur && l.id !== id), { id, ...doc }];
 }
+const checkedOut = (empId, d) => { const n = punchesOn(empId, d).length; return n > 0 && n % 2 === 0; };
 
-/* live auto-update — only works where the browser allows device location */
-function startLive() {
-  stopLive(true); LOC.live = true;
-  LOC.timer = setInterval(async () => {
-    if (!S.me) return;
-    const g = await tryGps();
-    if (g.err) { LOC.lastErr = g.err; stopLive(true); toast('Live location stopped: ' + g.err, 'warn'); schedule(); return; }
-    await act(() => addPing(S.me.id, today(), { t: Date.now(), src: 'live-gps', lat: g.lat, lng: g.lng, acc: g.acc, mode: 'update' }));
-    schedule();
-  }, LOC_EVERY_MIN * 60000);
+/* ── live sharing: Start (after consent) → a location every few minutes while OfficeHub is open → Stop ──
+   Browsers only allow this while the page is open, so closing the app pauses it; managers then see “Signal lost”.
+   Only one tab or device shares at a time: the record names it (dev), and the others stop or show “on another device”. */
+// this tab's id; kept across reloads of the same tab, so a reload shows "paused" (with Resume) rather than "another device"
+LOC.dev = (() => { const k = 'officehub-live-tab', fresh = Math.random().toString(36).slice(2, 10); try { const v = sessionStorage.getItem(k); if (v) return v; sessionStorage.setItem(k, fresh); } catch { /* storage blocked */ } return fresh; })();
+LOC.q = Promise.resolve();
+// live writes run one after another, so a Stop can never be overtaken by an update that was already on its way
+function liveWrite(fn) { const run = LOC.q.then(fn); LOC.q = run.catch(() => {}); return run; }
+const liveState = () => ({ on: true, since: LOC.since, every: liveEvery(), consentAt: LOC.consentAt, dev: LOC.dev, run: LOC.run });
+// optional: keep the screen on while sharing — phones stop running web pages (and their location updates) when it turns off
+async function wakeOn() {
+  if (!LOC.live || !LOC.wakeWanted || LOC.wake || document.hidden || !navigator.wakeLock) return;
+  try { LOC.wake = await navigator.wakeLock.request('screen'); LOC.wake.addEventListener?.('release', () => { LOC.wake = null; schedule(); }); } catch { LOC.wake = null; }
+  schedule();
 }
-function stopLive(quiet) { clearInterval(LOC.timer); LOC.timer = null; if (LOC.live && !quiet) toast('Live location stopped'); LOC.live = false; }
+function wakeOff() { try { LOC.wake?.release(); } catch { /* already released */ } LOC.wake = null; }
+function livePing(g, mode) {
+  return liveWrite(async () => {
+    if (mode !== 'start' && !LOC.live) return; // stopped while this update was waiting
+    const d = today();
+    await addPing(S.me.id, d, { t: Date.now(), src: 'live-gps', lat: g.lat, lng: g.lng, acc: g.acc, mode }, liveState());
+    LOC.day = d; LOC.lastTick = Date.now();
+  });
+}
+function armLive() {
+  clearInterval(LOC.timer);
+  LOC.live = true; LOC.lastErr = '';
+  LOC.timer = setInterval(liveTick, liveEvery() * 60000);
+}
+// why live sharing can't run right now ('' when it can)
+function liveBlocked(d = today()) {
+  if (!remoteKind(S.me.id, d)) return 'Live sharing is only for work-from-home and official-duty days.';
+  if (checkedOut(S.me.id, d)) return 'You’ve checked out for today.';
+  return '';
+}
+// consentAt: when the employee agreed (the consent dialog, or the "keep updating" box on the share form)
+async function startLive(consentAt) {
+  const no = liveBlocked(); if (no) fail(no);
+  await stopLive(true);
+  const g = await tryGps(true);
+  if (g.err) { LOC.lastErr = g.err; fail(g.err + ' Allow location for this site in your browser, then try again.'); }
+  Object.assign(LOC, { since: Date.now(), consentAt: consentAt || Date.now(), run: Math.random().toString(36).slice(2, 10) });
+  await livePing(g, 'start');
+  armLive();
+  wakeOn();
+}
+async function liveTick() {
+  if (!LOC.live || LOC.busy || !S.me) return;
+  LOC.busy = true;
+  try {
+    const d = today(), cur = locOf(S.me.id, LOC.day || d)?.live;
+    // stopped on another tab / device, or a newer share started there: stop here, without writing
+    if (cur && ((cur.on === false && (cur.stoppedAt || 0) >= LOC.since) || (cur.on && cur.run && cur.run !== LOC.run && (cur.since || 0) > LOC.since))) {
+      await stopLive(true); toast(cur.on ? 'Live location is now shared from another tab or device.' : 'Live location was stopped on another tab or device.', 'warn'); return;
+    }
+    // the WFH day is over: past midnight, not a WFH / official-duty day, or checked out
+    const over = d !== LOC.day ? 'the day ended' : !remoteKind(S.me.id, d) ? 'today isn’t a work-from-home day' : checkedOut(S.me.id, d) ? 'you checked out' : '';
+    if (over) { await stopLive(true, true); toast(`Live location stopped — ${over}.`, 'warn'); return; }
+    const g = await tryGps(true);
+    if (!LOC.live) return;
+    if (g.err) {
+      LOC.lastErr = g.err;
+      if (g.denied) { await stopLive(true, true); toast('Live location stopped: ' + g.err, 'warn'); }
+      return;
+    }
+    await livePing(g, 'update'); LOC.lastErr = '';
+  } catch (e) {
+    // the server refuses updates from a run that was stopped on another tab or device
+    if (e?.code === 'live_stopped') { await stopLive(true); toast('Live location was stopped on another tab or device.', 'warn'); } else LOC.lastErr = errText(e);
+  } finally { LOC.busy = false; schedule(); }
+}
+// write: also mark the day's record as stopped, so managers see “Stopped” rather than “Signal lost”
+async function stopLive(quiet, write) {
+  clearInterval(LOC.timer); LOC.timer = null; wakeOff();
+  const was = LOC.live; LOC.live = false;
+  if (write) await liveOff();
+  if (was && !quiet) toast('Live location stopped');
+}
+function liveOff() {
+  return liveWrite(async () => {
+    if (!S.me) return;
+    const d = LOC.day || today(), cur = locOf(S.me.id, d);
+    if (!cur?.live?.on) return;
+    const live = { ...cur.live, on: false, stoppedAt: Date.now() };
+    await patch(`loc/${S.me.id}_${d}`, { live });
+    S.locs = S.locs.map((l) => (l.id === cur.id ? { ...l, live } : l));
+  });
+}
+// timers are slowed down while the tab is in the background — catch up as soon as it is visible again, then restart the clock
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) wakeOn(); // the screen lock is released whenever the page is hidden
+  if (document.hidden || !LOC.live || Date.now() - LOC.lastTick <= liveEvery() * 60000 - 5000) return;
+  liveTick().then(() => { if (LOC.live) { clearInterval(LOC.timer); LOC.timer = setInterval(liveTick, liveEvery() * 60000); } });
+});
+
+function liveConsentForm() {
+  if (!M) return '';
+  const kind = remoteKind(S.me.id, today());
+  return `${mhead('Start live location sharing', `${kind === 'OD' ? 'Official duty' : 'Work from home'} · ${fmtD(today())}`)}
+  <form data-f="loc-live"><div class="body">
+    <p style="margin-top:0">While live sharing is on, OfficeHub records this device’s location every <b>${liveEvery()} minutes</b>.</p>
+    <ul class="small consent-list">
+      <li><b>Who can see it:</b> you, your reporting manager (and their managers), your department head, HR, directors and administrators. Other colleagues can’t see these location updates.</li>
+      <li><b>When it runs:</b> only while OfficeHub is open on this device and you’re signed in. It stops when you press <i>Stop</i>, check out or sign out. If you close the app it pauses, and your manager sees “Signal lost”.</li>
+      <li><b>What is saved:</b> your coordinates, how accurate they are and the time, with today’s attendance.</li>
+      <li>Your browser will ask for permission to use your location.</li></ul>
+    ${navigator.wakeLock ? '<label class="check" style="margin-bottom:8px"><input type="checkbox" id="lv-wake" name="wake" checked> Keep my screen on while sharing — phones stop sending updates when the screen turns off (uses more battery)</label>' : '<p class="small muted" style="margin:0 0 8px">On a phone, keep OfficeHub open with the screen on — updates stop while the screen is off.</p>'}
+    <label class="check"><input type="checkbox" id="lv-agree" name="agree" required> I agree to share my live location as described above.</label>
+  </div><footer><button type="button" class="btn" data-a="close">Cancel</button>
+    <button type="submit" class="btn pri" ${M.busy ? 'disabled' : ''}>${M.busy ? 'Finding you…' : 'Start sharing'}</button></footer></form>`;
+}
+async function liveSubmit(form, fd) {
+  if (fd.get('agree') !== 'on') return toast('Tick the box to agree first.', 'warn');
+  LOC.wakeWanted = fd.get('wake') === 'on';
+  if (!M || M.busy) return;
+  M.busy = true; drawModal();
+  const ok = await act(() => startLive(Date.now()));
+  if (!M) return;
+  M.busy = false;
+  if (ok) { closeModal(); toast(`Live location on — it updates every ${liveEvery()} minutes while OfficeHub is open`); } else drawModal();
+  schedule();
+}
 
 /* photo: shrink on the phone before upload so it is quick and small */
 async function shrinkImage(file, max = 1280) {
@@ -93,7 +212,7 @@ function locForm(mode) {
   const home = S.me.wfhLoc, g = M.gps;
   const btn = mode === 'in' ? 'Share location & check in' : mode === 'out' ? 'Share location & check out' : 'Share location';
   return `${mhead(mode === 'update' ? 'Share my location' : mode === 'in' ? 'Check in — share your location' : 'Check out — share your location',
-    `${kind === 'OD' ? 'Official duty' : kind === 'WFH' ? 'Work from home' : 'Location update'} · ${fmtD(T)} · your reporting manager and HR can see this`)}
+    `${kind === 'OD' ? 'Official duty' : kind === 'WFH' ? 'Work from home' : 'Location update'} · ${fmtD(T)} · visible to your managers, department head, HR, directors and administrators`)}
   <form data-f="loc" data-mode="${mode}"><div class="body fgrid">
     <div class="full locbox">
       <div class="row" style="justify-content:space-between;gap:10px"><div><b>1. Use this device’s location</b><div class="tiny muted">Fastest — works on phones and browsers that allow location.</div></div>
@@ -113,7 +232,7 @@ function locForm(mode) {
     <div class="f full" style="display:grid;gap:4px"><span>Photo <span class="muted">(optional — e.g. your workspace or the client site)</span></span>
       ${M.photo ? `<div class="row small" style="color:var(--ok)">Photo attached · ${fsize(M.photo.size)} <button type="button" class="btn sm ghost" data-a="loc-photo-rm">Remove</button></div>`
         : `<input class="i" type="file" id="lc-photo" accept="image/*" data-c="locPhoto" ${M.photoBusy ? 'disabled' : ''}>${M.photoBusy ? '<span class="tiny muted">Uploading…</span>' : ''}`}</div>
-    ${g ? `<label class="check full"><input type="checkbox" id="lc-auto" name="auto" ${LOC.live ? 'checked' : ''}> Keep updating my location every ${LOC_EVERY_MIN} minutes while OfficeHub is open</label>` : ''}
+    ${g && !liveBlocked() ? `<label class="check full"><input type="checkbox" id="lc-auto" name="auto" ${LOC.live ? 'checked' : ''}> Keep updating my location every ${liveEvery()} minutes while OfficeHub is open (live sharing — stop it any time)</label>` : ''}
     ${kind === 'WFH' && !home ? `<label class="check full"><input type="checkbox" id="lc-home" name="saveHome" checked> Save this as my usual work-from-home location (managers will see if you’re far from it)</label>` : ''}
   </div><footer>
     <button type="button" class="btn" data-a="close">Cancel</button>
@@ -132,16 +251,31 @@ async function locSubmit(form, fd) {
       const pos = g || parsed || {};
       const liveLink = fd.get('liveLink') === 'on' && !!link;
       const ping = { t: Date.now(), src: g ? 'gps' : liveLink ? 'live' : 'link', mode, lat: pos.lat ?? null, lng: pos.lng ?? null, acc: g?.acc ?? null, link: link || null, addr: v('addr').slice(0, 200), photo: M?.photo || null };
-      await addPing(S.me.id, T, ping);
+      // ticking "keep updating" on this form (which says who can see it) is the consent to live sharing
+      const goLive = !!g && fd.get('auto') === 'on' && mode !== 'out' && !liveBlocked();
+      const rec = locOf(S.me.id, T)?.live, stoppedElsewhere = rec?.on === false && rec.run === LOC.run;
+      // a fresh run when starting — or when this tab's run was already stopped on another device (ticking the box again is new consent)
+      if (goLive && (!LOC.live || stoppedElsewhere)) Object.assign(LOC, { since: Date.now(), consentAt: Date.now(), run: Math.random().toString(36).slice(2, 10) });
+      // unticking stops sharing only if it runs here (or this tab's paused run); a one-off share from another device leaves it alone.
+      // Checking out ends the day's sharing everywhere.
+      if (!goLive && (mode === 'out' || LOC.live || (rec?.on && rec.dev === LOC.dev))) await stopLive(true, true);
+      let live = goLive;
+      try { await addPing(S.me.id, T, ping, goLive ? liveState() : undefined); } catch (e) {
+        // live sharing was stopped elsewhere a moment ago: still record this location (and the check-in / check-out), without live
+        if (e?.code !== 'live_stopped') throw e;
+        await stopLive(true); live = false;
+        const cur = locOf(S.me.id, T)?.live;
+        await addPing(S.me.id, T, ping, cur ? { ...cur, on: false, stoppedAt: cur.stoppedAt || Date.now() } : null);
+        toast('Live location was stopped on another tab or device — this location was still saved.', 'warn');
+      }
+      if (live) { LOC.day = T; LOC.lastTick = Date.now(); armLive(); wakeOn(); }
       if (fd.get('saveHome') === 'on' && pos.lat != null) await patch(`emp/${S.me.id}`, { wfhLoc: { lat: pos.lat, lng: pos.lng, addr: ping.addr || '', at: Date.now() } });
-      if (g && fd.get('auto') === 'on' && mode !== 'out') startLive();
-      if (mode === 'out' || fd.get('auto') !== 'on') stopLive(true);
       const far = awayFromHome(S.me.id, ping);
       if (far != null && far > 2 && remoteKind(S.me.id, T) === 'WFH') {
         const mgr = S.me.managerId;
         if (mgr) await notify([mgr], { title: `${S.me.name} shared a WFH location ${kmTxt(far)} from their usual one`, body: ping.addr || '', go: { view: 'attendance' } });
       }
-    } else if (mode === 'out') stopLive(true);
+    } else if (mode === 'out') await stopLive(true, true);
     if (mode === 'in' || mode === 'out') await addPunches(S.me.id, T, [Date.now()], 'web');
     closeModal();
     toast(mode === 'update' ? 'Location shared' : `${mode === 'in' ? 'Checked in' : 'Checked out'} at ${hm(Date.now())}${skip ? '' : ' · location shared'}`);
@@ -151,7 +285,9 @@ async function locSubmit(form, fd) {
 async function locAction(a, el) {
   switch (a) {
     case 'loc-share': return openModal(() => locForm('update'));
-    case 'loc-stop': stopLive(); return schedule();
+    case 'loc-stop': await act(() => stopLive(false, true)); return schedule();
+    case 'loc-live': return openModal(liveConsentForm);
+    case 'loc-live-off': await act(() => liveOff(), 'Live location stopped'); return schedule();
     case 'loc-gps': {
       if (!M) return;
       M.gpsBusy = true; M.gpsErr = ''; drawModal();
@@ -202,18 +338,61 @@ const locText = (empId, d) => { const p = lastPing(locOf(empId, d)); return p ? 
 function myLocStrip() {
   if (!S.me) return '';
   const T = today(), kind = remoteKind(S.me.id, T), l = locOf(S.me.id, T), p = lastPing(l);
-  if (!kind && !p) return '';
+  if (!kind && !p && !LOC.live) return '';
   const every = +(cfg().locEveryH ?? 3), out = punchesOn(S.me.id, T).length % 2 === 0 && punchesOn(S.me.id, T).length > 0;
-  const stale = p && every > 0 && !out && !LOC.live && p.src !== 'live' && Date.now() - p.t > every * 3600000;
-  const tone = !p || stale ? 'var(--warn)' : 'var(--ok)';
-  const msg = LOC.live ? `Live location on · last update ${hm(p?.t)}`
+  const elsewhere = !LOC.live && !!l?.live?.on && !!l.live.dev && l.live.dev !== LOC.dev && liveStatus(l)[0] === 'live'; // another tab or device is sending
+  const paused = !LOC.live && !!l?.live?.on && !elsewhere; // live sharing was on, but nothing is sending (the app was closed or reloaded)
+  const stale = p && every > 0 && !out && !LOC.live && !paused && p.src !== 'live' && Date.now() - p.t > every * 3600000;
+  const tone = (LOC.live && !LOC.lastErr) || elsewhere ? 'var(--ok)' : !p || stale || paused || LOC.lastErr ? 'var(--warn)' : 'var(--ok)';
+  const msg = LOC.live ? `<b>Live location on</b> · updates every ${liveEvery()} min · last ${hm(p?.t)}${LOC.wake ? ' · screen kept on' : ''}${LOC.lastErr ? ` · <span style="color:var(--warn)">${esc(LOC.lastErr)} Retrying.</span>` : ''}`
+    : elsewhere ? `<b>Live location on</b> in another tab or device · last ${hm(p?.t)}`
+    : paused ? `Live sharing is paused — OfficeHub was closed or reloaded (last update ${hm(p?.t)}). Your manager sees “Signal lost” until you resume.`
     : !p ? `${kind === 'OD' ? 'Official duty' : 'Working from home'} today — share your location`
     : p.src === 'live' ? `Live location link shared at ${hm(p.t)}`
     : stale ? `Location last shared at ${hm(p.t)} — please share again` : `Location shared at ${hm(p.t)}`;
+  const canLive = !liveBlocked();
+  const btns = LOC.live ? '<button class="btn sm" data-a="loc-share" title="Send your location now, with an address or photo if you like">Share now</button><button class="btn sm" data-a="loc-stop">Stop sharing</button>'
+    : elsewhere ? '<button class="btn sm" data-a="loc-live-off">Stop sharing</button><button class="btn sm" data-a="loc-share">Share once</button>'
+    : paused ? `${canLive ? '<button class="btn sm pri" data-a="loc-live">Resume</button>' : ''}<button class="btn sm" data-a="loc-live-off">Stop</button>`
+    : `${canLive ? `<button class="btn sm ${!p ? 'pri' : ''}" data-a="loc-live" title="Share your location automatically every ${liveEvery()} minutes">Start live sharing</button>` : ''}<button class="btn sm ${(!p && !canLive) || stale ? 'pri' : ''}" data-a="loc-share">${p ? 'Share again' : 'Share once'}</button>`;
   return `<div class="locstrip" style="border-color:${tone}"><span class="dot" style="background:${tone}"></span><span class="grow small">${msg}</span>
-    ${p ? `<button class="btn sm ghost" data-a="loc-view" data-e="${S.me.id}" data-d="${T}">View</button>` : ''}
-    ${LOC.live ? '<button class="btn sm" data-a="loc-stop">Stop</button>' : `<button class="btn sm ${!p || stale ? 'pri' : ''}" data-a="loc-share">${p ? 'Share again' : 'Share location'}</button>`}</div>`;
+    ${p ? `<button class="btn sm ghost" data-a="loc-view" data-e="${S.me.id}" data-d="${T}">View</button>` : ''}${btns}</div>`;
 }
+
+/* ── managers / HR / admins: who is sharing right now (Attendance › Live locations) ── */
+function liveStatus(l) {
+  if (l?.live?.on) return Date.now() - (l.last || 0) > ((+l.live.every || 10) * 2 + 2) * 60000 ? ['lost', 'Signal lost', 't-warn'] : ['live', 'Live', 't-ok'];
+  if (l?.live?.stoppedAt) return ['stopped', `Stopped ${hm(l.live.stoppedAt)}`, ''];
+  const p = lastPing(l);
+  if (p) return ['shared', p.src === 'live' ? 'Live link' : 'Shared once', 't-info'];
+  return ['none', 'Not shared', 't-warn'];
+}
+const agoTxt = (t) => { const m = Math.max(0, Math.floor((Date.now() - t) / 60000)); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : `${Math.floor(m / 60)} h ${m % 60} min ago`; };
+function vLiveLocations() {
+  const T = today(), ORDER = { live: 0, lost: 1, shared: 2, stopped: 3, none: 4 };
+  const rows = scope().map(empById).filter((e) => e && e.id !== S.me.id)
+    .map((e) => ({ e, kind: remoteKind(e.id, T), l: locOf(e.id, T) })).filter((r) => r.kind || lastPing(r.l))
+    .map((r) => ({ ...r, st: liveStatus(r.l), p: lastPing(r.l) }))
+    .sort((a, b) => ORDER[a.st[0]] - ORDER[b.st[0]] || a.e.name.localeCompare(b.e.name));
+  const n = (k) => rows.filter((r) => r.st[0] === k).length;
+  const kpis = [['Live now', n('live'), 'ok'], ['Signal lost', n('lost'), n('lost') ? 'warn' : ''], ['Shared once', n('shared') + n('stopped'), ''], ['Not shared', n('none'), n('none') ? 'warn' : '']];
+  const where = (r) => {
+    if (!r.p) return '<span class="tiny muted">—</span>';
+    const far = awayFromHome(r.e.id, r.p);
+    return `<div class="small">${r.p.addr ? esc(r.p.addr) : r.p.lat != null ? `${r.p.lat}, ${r.p.lng}` : 'Map link'}${r.p.acc ? ` <span class="muted">±${r.p.acc} m</span>` : ''}</div>${far != null ? `<div class="tiny" style="${far > 2 ? 'color:var(--warn);font-weight:600' : 'color:var(--muted)'}">${kmTxt(far)} from usual WFH location</div>` : ''}`;
+  };
+  return `<div class="live-kpis">${kpis.map(([l, v, c]) => `<div class="kt" style="cursor:default"><span class="l">${l}</span><span class="v ${c}">${v}</span></div>`).join('')}</div>
+    ${card(`People on WFH / official duty today · ${fmtD(T)}`, rows.length ? `<div class="tbl-wrap"><table class="t live-t"><thead><tr><th>Employee</th><th>Status</th><th>Last update</th><th>Location</th><th></th></tr></thead><tbody>
+      ${rows.map((r) => `<tr><td>${person(r.e.id, `${r.kind === 'OD' ? 'Official duty' : r.kind === 'WFH' ? 'Work from home' : 'Shared a location'} · ${esc(deptOf(r.e.deptId)?.name || '')}`)}</td>
+        <td><span class="pill ${r.st[2]}">${r.st[1]}</span>${r.l?.live?.on ? `<div class="tiny muted">every ${+r.l.live.every || 10} min since ${hm(r.l.live.since)}</div>` : ''}</td>
+        <td>${r.p ? `<b class="small">${hm(r.p.t)}</b><div class="tiny muted">${agoTxt(r.p.t)}</div>` : '<span class="tiny muted">—</span>'}</td>
+        <td>${where(r)}</td>
+        <td><div class="row" style="gap:6px;flex-wrap:nowrap">${r.p && mapUrl(r.p) ? `<a class="btn sm" href="${esc(mapUrl(r.p))}" target="_blank" rel="noopener">Map</a>` : ''}${r.p ? `<button class="btn sm ghost" data-a="loc-view" data-e="${r.e.id}" data-d="${T}">History</button>` : ''}</div></td></tr>`).join('')}
+    </tbody></table></div>` : empty('Nobody you manage is on WFH or official duty today.'), { list: true })}
+    <p class="tiny muted">Live sharing sends a location every ${liveEvery()} minutes while the employee has OfficeHub open; “Signal lost” means no update for a while (app closed, no network or location turned off). Only the employee’s managers, department head, HR, directors and administrators can see this page’s data.</p>`;
+}
+// keep "x min ago" and Live / Signal lost fresh while the page is open
+setInterval(() => { if (S.view === 'attendance' && ui('attTab', '') === 'live') schedule(); }, 30000);
 
 /* manager alert */
 function locAlertCount(ids, d) {
@@ -227,6 +406,11 @@ function locAlertCount(ids, d) {
 .locbox{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--sunk)}
 .locstrip{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-left-width:4px;border-radius:8px;padding:6px 8px;margin:8px 0 0}
 .locstrip .dot{width:8px;height:8px;border-radius:50%;flex:none}
+.locstrip{flex-wrap:wrap}
+.consent-list{padding-left:18px;margin:0 0 12px;display:grid;gap:6px}
+.live-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:14px}
+.live-t td{vertical-align:top}
+@media (max-width:520px){.live-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--sunk);border-radius:999px;padding:3px 4px 3px 10px;font-size:13px}
 .chip-x{border:0;background:transparent;color:var(--muted);cursor:pointer;border-radius:50%;width:22px;height:22px;font-size:11px}
 .chip-x:hover{background:var(--line);color:var(--ink)}

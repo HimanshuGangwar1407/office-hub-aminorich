@@ -38,7 +38,7 @@ const S = {
 const NEED = ['cfg', 'emp', 'req', 'task', 'dreq', 'att', 'tpl', 'wlog', 'chat'];
 
 const DEFAULT_CFG = {
-  company: 'Aminorich Nutrients', attSource: 'web', importedThrough: '', webPunch: true, wfhLoc: 'required', locEveryH: 3,
+  company: 'Aminorich Nutrients', attSource: 'web', importedThrough: '', webPunch: true, wfhLoc: 'required', locEveryH: 3, liveEveryMin: 10,
   shift: { start: '09:30', end: '18:00', grace: 15, halfMin: 240 }, weeklyOff: [0], secondSat: true,
   holidays: [], announcements: [],
   leaveTypes: [

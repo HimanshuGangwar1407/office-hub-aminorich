@@ -188,11 +188,12 @@ function vDashboard() {
 /* ═════════════ Attendance ═════════════ */
 function vAttendance() {
   const mgr = isManager(), tab = ui('attTab', mgr ? 'today' : 'mine');
-  const tabs = [['today', 'Daily board', mgr], ['mine', 'My attendance', true], ['register', 'Monthly register', mgr], ['salary', 'Salary sheet', canSalary()], ['import', 'Import machine report', isHR()]].filter((t) => t[2]);
+  const tabs = [['today', 'Daily board', mgr], ['live', 'Live locations', mgr], ['mine', 'My attendance', true], ['register', 'Monthly register', mgr], ['salary', 'Salary sheet', canSalary()], ['import', 'Import machine report', isHR()]].filter((t) => t[2]);
   let body = `<div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button class="tab" role="tab" aria-selected="${tab === k}" data-a="ui" data-k="attTab" data-v="${k}">${l}</button>`).join('')}</div>`;
   const T = today();
   if (tab === 'mine') body += monthView(S.me, ui('attMonth', T.slice(0, 7)));
   if (tab === 'salary') body += canSalary() ? vSalary() : '';
+  if (tab === 'live' && mgr) body += vLiveLocations();
   if (tab === 'today') {
     const d = ui('attDate', T), dept = ui('attDept', '');
     const rows = scope().map(empById).filter((e) => e && (!dept || e.deptId === dept)).sort((a, b) => a.name.localeCompare(b.name)).map((e) => ({ e, s: dayStatus(e, d) }));
