@@ -1,7 +1,7 @@
 // All OfficeHub API routes. Used by api/main.js on Vercel and by scripts/dev-server.mjs locally.
 import { q, getPool, ensureSchema, writeDoc, getDoc, parentOf } from './db.js';
 import { sessionFrom, hashPassword, checkPassword, passwordProblem, newUid, makeToken, cookieHeader, safeEqual } from './auth.js';
-import { chatWriteProblem } from './chat-rules.js';
+import { chatWriteProblem, clearedChatsProblem } from './chat-rules.js';
 
 const SALARY = new Set(['pay', 'payroll', 'fines']);
 const PROTECTED_EMP = ['role', 'userId', 'active', 'status', 'code', 'email'];
@@ -26,7 +26,11 @@ function checkWrite(op, path, data, old, s) {
   const no = (m) => fail(403, 'permission_denied', m || 'You don’t have permission to change this.');
   if (!s.active) no('Your account is not active. Ask HR.');
   if (c === 'auth') no();
-  if (c === 'data') { if (!(a === 'users' && b === s.uid)) no(); return; }
+  if (c === 'data') {
+    if (!(a === 'users' && b === s.uid)) no();
+    if (path === `data/users/${s.uid}/cleared`) { const bad = clearedChatsProblem(op, data, old); if (bad) fail(400, 'invalid_argument', bad); }
+    return;
+  }
   if (SALARY.has(c)) { if (!s.salary) no('Only HR or an administrator can change salary data.'); return; }
   if (c === 'cfg') {
     if (!s.hr && !s.bootstrap) no('Only HR or an administrator can change settings.');

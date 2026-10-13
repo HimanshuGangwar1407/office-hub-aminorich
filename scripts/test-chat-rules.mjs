@@ -1,6 +1,6 @@
 // Tests the group-chat permission rules in server/chat-rules.js. Run: node scripts/test-chat-rules.mjs
 import assert from 'node:assert/strict';
-import { chatWriteProblem, isGroupAdmin } from '../server/chat-rules.js';
+import { chatWriteProblem, isGroupAdmin, clearedChatsProblem } from '../server/chat-rules.js';
 
 const ADMIN = 'E1', MEMBER = 'E2', OTHER = 'E3', OUTSIDER = 'E4';
 const as = (empId) => ({ empId });
@@ -90,6 +90,38 @@ test('isGroupAdmin only accepts groups', () => {
   assert.equal(isGroupAdmin(group(), ADMIN), true);
   assert.equal(isGroupAdmin(group(), MEMBER), false);
   assert.equal(isGroupAdmin({ kind: 'dept', createdBy: ADMIN }, ADMIN), false);
+});
+
+const cleared = (o = {}) => ({ at: 1700000000000, n: { '2026-10_E1': [3, 'm3', 1699999990000], '2026-10_E2': [1, 'm9', 1700000000000] }, last: '1700000000000|E2', p: ['m1'], nt: ['n1'], ...o });
+
+test('deleted-chats record accepts direct chats with message counts', () => {
+  assert.equal(clearedChatsProblem('set', { 'dm-E1-E2': cleared() }, null), null);
+  assert.equal(clearedChatsProblem('set', { 'dm-E1-E2': { at: 1, n: {} } }, null), null);
+  assert.equal(clearedChatsProblem('set', { 'dm-E1-E2': cleared({ pend: '1700000000001|E1' }) }, null), null);
+  assert.equal(clearedChatsProblem('update', { 'dm-E1-E3': cleared() }, { 'dm-E1-E2': cleared() }), null);
+  assert.equal(clearedChatsProblem('delete', undefined, { 'dm-E1-E2': cleared() }), null);
+});
+
+test('deleted-chats record rejects group/company chats and malformed entries', () => {
+  const bad = (data, old = null) => assert.notEqual(clearedChatsProblem('update', data, old), null, JSON.stringify(data));
+  assert.notEqual(clearedChatsProblem('set', { 'g-1': cleared() }, null), null);
+  assert.notEqual(clearedChatsProblem('set', { all: cleared() }, null), null);
+  bad({ 'dm-E1-E2': 5 });
+  bad({ 'dm-E1-E2': null });
+  bad({ 'dm-E1-E2': cleared({ at: 'soon' }) });
+  bad({ 'dm-E1-E2': cleared({ at: -1 }) });
+  bad({ 'dm-E1-E2': cleared({ n: null }) });
+  bad({ 'dm-E1-E2': cleared({ n: { '2026-10_E1': 3 } }) });
+  bad({ 'dm-E1-E2': cleared({ n: { '2026-10_E1': [-1, 'm1', 1] } }) });
+  bad({ 'dm-E1-E2': cleared({ n: { '2026-10_E1': [1.5, 'm1', 1] } }) });
+  bad({ 'dm-E1-E2': cleared({ n: { '2026-10_E1': [1, 'bad/id', 1] } }) });
+  bad({ 'dm-E1-E2': cleared({ n: { '2026-10_E1': [1, 'm1', 'x'] } }) });
+  bad({ 'dm-E1-E2': cleared({ n: { 'bad/id': [1, 'm1', 1] } }) });
+  bad({ 'dm-E1-E2': cleared({ last: 7 }) });
+  bad({ 'dm-E1-E2': cleared({ pend: 7 }) });
+  bad({ 'dm-E1-E2': cleared({ p: 'm1' }) });
+  bad({ 'dm-E1-E2': cleared({ nt: [1] }) });
+  bad({ 'dm-E1-E3': cleared() }, { 'dept-1': cleared() });
 });
 
 console.log(`\n${n} tests passed`);

@@ -60,3 +60,33 @@ function bucketProblem(op, data, old, empId, parent, chatId) {
   if (data && data.by !== undefined && data.by !== empId) return 'You can only write your own messages.';
   return null;
 }
+
+// data/users/{uid}/cleared — the direct chats a person deleted for themselves:
+// { [chatId]: { at, n: { bucketId: [count, last entry id, its time] }, last: 'at|by' of the latest message, pend?: same for a send still landing, p: [pin ids], nt: [notification ids] } }.
+// Only the owner can write it (checked in app.js); this keeps its contents well formed.
+const CLEARED_KEY = /^dm-[A-Za-z0-9_\-.~:@+]{1,200}$/;
+const ID = /^[A-Za-z0-9_\-.~:@+]{1,200}$/;
+const time = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+const mark = (v) => Array.isArray(v) && v.length === 3 && Number.isInteger(v[0]) && v[0] >= 0 && typeof v[1] === 'string' && ID.test(v[1]) && time(v[2]);
+const ids = (v, max) => v === undefined || (Array.isArray(v) && v.length <= max && v.every((x) => typeof x === 'string' && ID.test(x)));
+function clearedEntryProblem(e) {
+  if (!e || typeof e !== 'object' || Array.isArray(e)) return 'Bad chat deletion record.';
+  if (!time(e.at)) return 'Bad chat deletion time.';
+  if (!e.n || typeof e.n !== 'object' || Array.isArray(e.n)) return 'Bad chat deletion record.';
+  const n = Object.entries(e.n);
+  if (n.length > 500 || n.some(([k, v]) => !ID.test(k) || !mark(v))) return 'Bad chat deletion record.';
+  for (const s of [e.last, e.pend]) if (s !== undefined && (typeof s !== 'string' || s.length > 400)) return 'Bad chat deletion record.';
+  if (!ids(e.p, 100) || !ids(e.nt, 300)) return 'Bad chat deletion record.';
+  return null;
+}
+export function clearedChatsProblem(op, data, old) {
+  if (op === 'delete') return null;
+  const next = op === 'update' ? { ...(old || {}), ...(data || {}) } : data || {};
+  const keys = Object.keys(next);
+  if (keys.length > 5000) return 'Too many deleted chats.';
+  for (const k of keys) {
+    if (!CLEARED_KEY.test(k)) return 'Only direct chats can be deleted this way.';
+    const bad = clearedEntryProblem(next[k]); if (bad) return bad;
+  }
+  return null;
+}
