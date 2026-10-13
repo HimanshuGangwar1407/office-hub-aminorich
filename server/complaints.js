@@ -33,22 +33,23 @@ export function ownerKeyFor(empId) {
 
 const isStaffRole = (role) => STAFF_ROLES.includes(role);
 
-/** Staff can see every complaint. Mirrors the app's manager rule: management roles, department heads, or anyone with direct reports. */
-export async function isComplaintStaff(who, q, cfgDoc) {
-  if (!who.active || !who.empId) return false;
+/** Staff can see every complaint. Mirrors the app's manager rule: management roles, department heads, or anyone with direct reports.
+ *  `ctx` is the access context from server/access.js (employee records and department list, read from the database). */
+export function isComplaintStaffCtx(who, ctx) {
+  if (!who?.active || !who.empId) return false;
   if (isStaffRole(who.role)) return true;
-  if ((cfgDoc?.depts || []).some((d) => d.headId === who.empId)) return true;
-  const r = await q(`SELECT 1 FROM docs WHERE parent = 'emp' AND NOT deleted AND data->>'managerId' = $1
-    AND COALESCE(data->>'active', 'true') <> 'false' LIMIT 1`, [who.empId]);
-  return r.rowCount > 0;
+  if ((ctx?.depts || []).some((d) => d?.headId === who.empId)) return true;
+  for (const e of ctx?.emps?.values() || []) {
+    if (e.managerId === who.empId && e.active !== false && e.status !== 'EXITED') return true;
+  }
+  return false;
 }
 
 /** Whether an employee record may be assigned complaints (HR or a manager). */
-export async function isAssignable(empId, q, cfgDoc) {
-  const r = await q(`SELECT data FROM docs WHERE path = $1 AND NOT deleted`, [`emp/${empId}`]);
-  if (!r.rowCount) return false;
-  const e = r.rows[0].data || {};
-  return isComplaintStaff({ active: e.active !== false && e.status !== 'EXITED', role: e.role, empId }, q, cfgDoc);
+export function isAssignableCtx(empId, ctx) {
+  const e = ctx?.emps?.get(empId);
+  if (!e) return false;
+  return isComplaintStaffCtx({ active: e.active !== false && e.status !== 'EXITED', role: e.role, empId }, ctx);
 }
 
 /** Read rule for complaint documents. `staff` is isComplaintStaff() for the session. */

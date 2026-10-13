@@ -4,7 +4,8 @@
    avatars, emoji reactions, edit, pin, starred chats, "new messages" line, a Mentions inbox, and — through the
    room capability — who is online right now and who is typing. */
 const CH2 = { pop: null, editing: null, picker: null, room: null, peers: [], typingT: 0, seenFor: null, seenAt: 0, lastPresence: '' };
-const QUICK_RX = ['👍', '✅', '😂', '🙏', '🎉', '👀'];
+/* outline smiley-with-plus for the per-message reaction button (opens the picker; no emoji shown until clicked) */
+const RX_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M20.5 11A9 9 0 1 1 13 3.5"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0"/><path d="M9 9.5h.01M15 9.5h.01"/><path d="M19 2v6M16 5h6"/></svg>';
 const EMOJI = ['👍', '✅', '😂', '🙏', '🎉', '👀', '❤️', '🔥', '👏', '💯', '🤝', '😊', '🙌', '⚠️', '❌', '📌'];
 
 /* ── presence: online now / typing (room capability; the page works without it) ── */
@@ -54,14 +55,15 @@ function mentionsOf(text, c) {
 
 /* ── the chat page ── */
 function vChats2() {
-  const chats = myChats(), q = ui('chQ', '').toLowerCase(), on = onlineIds(), fav = new Set(CHAT.reads._fav || []);
+  // a deleted direct chat you reopened shows no old preview
+  const chats = myChats().map((c) => (c.kind === 'dm' && nothingNew(c) ? { ...c, last: null } : c)), q = ui('chQ', '').toLowerCase(), on = onlineIds(), fav = new Set(CHAT.reads._fav || []);
   let openId = S.ui.chat || CHAT.openId;
   const mentionsView = openId === '@mentions';
   if (openId && !mentionsView && !chats.some((c) => c.id === openId)) openId = null;
   if (openId && !mentionsView) openChat(openId); else { CHAT.unsub?.(); CHAT.unsub = null; CHAT.openId = null; }
   if (openId !== CH2.seenFor) { CH2.seenFor = openId; CH2.seenAt = CHAT.reads[openId] || 0; CH2.editing = null; CH2.pop = null; }
   setPresence({ chat: mentionsView ? null : openId || null });
-  const ments = S.ntf.filter((n) => n.go?.chat && /mentioned you|replied to you/.test(n.title));
+  const ments = S.ntf.filter((n) => n.go?.chat && /mentioned you|replied to you/.test(n.title) && !(clearedOf(n.go.chat)?.nt || []).includes(n.id));
   const unM = ments.filter((n) => !n.read).length;
   const list = chats.filter((c) => !q || c.title.toLowerCase().includes(q)).sort((a, b) => (b.last?.at || 0) - (a.last?.at || 0) || a.title.localeCompare(b.title));
   const item = (c) => { const other = c.kind === 'dm' ? (c.members || []).find((x) => x !== S.me.id) : null; const typ = typingIn(c.id);
@@ -81,7 +83,7 @@ function vChats2() {
   }
   const c = chats.find((x) => x.id === openId);
   if (c) {
-    const msgs = messagesOf(), fq = ui('chFind', '').toLowerCase(), tab = ui('chTab', 'msgs'), members = chatMembers(c), pins = c.pins || [];
+    const msgs = messagesOf(), fq = ui('chFind', '').toLowerCase(), tab = ui('chTab', 'msgs'), members = chatMembers(c), pins = (c.pins || []).filter((p) => !(clearedOf(c.id)?.p || []).includes(p.id));
     const other = c.kind === 'dm' ? (c.members || []).find((x) => x !== S.me.id) : null, typ = typingIn(c.id);
     let body = '';
     if (tab === 'files') {
@@ -115,13 +117,16 @@ function vChats2() {
         if (sys) return `${sep}${nw}<div class="msg-sys">${esc(m.text)} · ${hm(m.at)}</div>`;
         return `${sep}${nw}<div class="msg ${mine ? 'mine' : 'theirs'} ${cont ? 'cont' : ''} ${meTagged ? 'hl' : ''} ${pinned.has(m.id) ? 'pinned' : ''}" id="m-${m.id}">
           <div class="msg-av">${cont ? `<span class="msg-t">${hm(m.at)}</span>` : `<span class="av-wrap">${avatar(nameOf(m.by))}${onlineDot(m.by, on)}</span>`}</div>
+          <div class="msg-line">
           <div class="msg-body" title="${esc(fmtDT(m.at))}">
             ${cont ? '' : `<div class="msg-h"><b>${esc(nameOf(m.by))}</b>${mine ? '<span class="you">you</span>' : ''}<span class="msg-des tiny muted">${esc(empById(m.by)?.designation || '')}</span><span class="msg-time tiny muted">${hm(m.at)}</span>${pinned.has(m.id) ? '<span class="tiny">📌</span>' : ''}</div>`}
             ${m.deleted ? '<i class="muted small">Message deleted</i>' : `${m.reply ? `<button class="quote" data-a="chat-jump" data-m="${m.reply.id}"><b class="tiny">${esc(nameOf(m.reply.by))}</b><span class="tiny trunc" style="display:block">${esc(m.reply.text)}</span></button>` : ''}${m.file ? (m.file.voice ? voiceChip(m.file) : fileChip(m.file, m.id)) : ''}${m.text ? `<div class="btext">${fmtMsg(m)}${m.edited ? ' <span class="tiny muted">(edited)</span>' : ''}</div>` : ''}`}
-            ${Object.keys(rxBy).length ? `<div class="rxs">${Object.entries(rxBy).map(([e, bys]) => `<button class="rxp ${bys.includes(S.me.id) ? 'on' : ''}" data-a="chat-react" data-m="${m.id}" data-e="${e}" title="${esc(bys.map(nameOf).join(', '))}">${e} <b>${bys.length}</b></button>`).join('')}<button class="rxp add" data-a="chat-pick" data-m="${m.id}" aria-label="Add reaction">+</button></div>` : ''}
-            ${CH2.picker === m.id ? `<div class="rx-picker">${EMOJI.map((e) => `<button data-a="chat-react" data-m="${m.id}" data-e="${e}">${e}</button>`).join('')}</div>` : ''}
+            ${Object.keys(rxBy).length ? `<div class="rxs">${Object.entries(rxBy).map(([e, bys]) => `<button class="rxp ${bys.includes(S.me.id) ? 'on' : ''}" data-a="chat-react" data-m="${m.id}" data-e="${e}" title="${esc(bys.map(nameOf).join(', '))}">${e} <b>${bys.length}</b></button>`).join('')}</div>` : ''}
+            ${CH2.picker === m.id ? `<div class="rx-picker" role="menu" aria-label="Pick a reaction">${EMOJI.map((e) => `<button data-a="chat-react" data-m="${m.id}" data-e="${e}" role="menuitem" title="React ${e}">${e}</button>`).join('')}</div>` : ''}
           </div>
-          ${m.deleted ? '' : `<div class="msg-tools" role="toolbar" aria-label="Message actions">${QUICK_RX.slice(0, 3).map((e) => `<button data-a="chat-react" data-m="${m.id}" data-e="${e}" title="React ${e}">${e}</button>`).join('')}<button data-a="chat-pick" data-m="${m.id}" title="More reactions">😊+</button><button data-a="chat-reply" data-m="${m.id}" title="Reply">↩</button><button data-a="chat-pin" data-m="${m.id}" title="${pinned.has(m.id) ? 'Unpin' : 'Pin'}">📌</button>${mine && m.text ? `<button data-a="chat-edit" data-m="${m.id}" title="Edit">✎</button>` : ''}${m.text ? `<button data-a="chat-task" data-m="${m.id}" title="Make a task">☑</button>` : ''}${mine ? `<button data-a="chat-del" data-m="${m.id}" title="Delete">🗑</button>` : ''}</div>`}
+          ${m.deleted ? '' : `<button class="rx-btn ${CH2.picker === m.id ? 'on' : ''}" data-a="chat-pick" data-m="${m.id}" title="Add reaction" aria-label="Add reaction" aria-haspopup="menu" aria-expanded="${CH2.picker === m.id}">${RX_ICON}</button>`}
+          </div>
+          ${m.deleted ? '' : `<div class="msg-tools" role="toolbar" aria-label="Message actions"><button data-a="chat-reply" data-m="${m.id}" title="Reply">↩</button><button data-a="chat-pin" data-m="${m.id}" title="${pinned.has(m.id) ? 'Unpin' : 'Pin'}">📌</button>${mine && m.text ? `<button data-a="chat-edit" data-m="${m.id}" title="Edit">✎</button>` : ''}${m.text ? `<button data-a="chat-task" data-m="${m.id}" title="Make a task">☑</button>` : ''}${mine ? `<button data-a="chat-del" data-m="${m.id}" title="Delete">🗑</button>` : ''}</div>`}
         </div>`;
       }).join('')}</div>`;
     }
@@ -133,6 +138,7 @@ function vChats2() {
         <div class="grow" style="min-width:0"><b class="trunc" style="display:block">${esc(c.title)}</b><span class="tiny ${typ.length ? 'typing-t' : 'muted'}">${typ.length ? `${esc(typ.join(', '))} ${typ.length > 1 ? 'are' : 'is'} typing…` : c.kind === 'dm' ? `${esc(empById(other)?.designation || '')}${on.has(other) ? ' · <span class="on-t">online</span>' : ''}` : `${members.length} members · ${members.filter((x) => on.has(x)).length} online${c.kind === 'dept' ? ' · department' : c.kind === 'all' ? ' · whole company' : ''}`}</span></div>
         <input class="i" id="ch-find" data-i="chFind" placeholder="Search · #tag" value="${esc(ui('chFind', ''))}" style="width:170px">
         <button class="btn ghost sm" data-a="chat-fav" title="${fav.has(c.id) ? 'Unstar' : 'Star'} this chat" aria-pressed="${fav.has(c.id)}">${fav.has(c.id) ? '★' : '☆'}</button>
+        ${c.kind === 'dm' ? '<button class="btn ghost sm" data-a="chat-dm-delete" title="Delete this chat for you" aria-label="Delete this chat">🗑</button>' : ''}
       </header>
       <div class="tabs chat-tabs">${[['msgs', 'Messages'], ['pins', `Pinned${pins.length ? ` (${pins.length})` : ''}`], ['files', `Files (${msgs.filter((m) => m.file && !m.deleted).length})`], ['members', `Members (${members.length})`]].map(([k, l]) => `<button class="tab" aria-selected="${tab === k}" data-a="ui" data-k="chTab" data-v="${k}">${l}</button>`).join('')}</div>
       ${body}
@@ -213,6 +219,14 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key === 'ArrowUp' && !ev.target.value && !CH2.editing) { const last = messagesOf().filter((m) => m.by === S.me.id && m.text && !m.deleted).pop(); if (last) { ev.preventDefault(); CH2.editing = last; schedule(); setTimeout(() => { const t = $('#ch-text'); if (t) { t.value = last.text; autosize(t); t.focus(); } }, 30); } }
 }, true);
 
+/* the reaction picker closes on Escape or a click anywhere outside it */
+document.addEventListener('click', (ev) => {
+  if (CH2.picker && !ev.target.closest?.('.rx-picker, .rx-btn')) { CH2.picker = null; schedule(); }
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && CH2.picker) { CH2.picker = null; schedule(); }
+});
+
 /* ── actions ── */
 async function chatAction2(a, el, ev) {
   const msg = () => messagesOf().find((m) => m.id === el.dataset.m);
@@ -242,6 +256,7 @@ async function chatAction2(a, el, ev) {
     case 'chat-voice-send': return voiceStop(false);
     case 'chat-voice-cancel': return voiceStop(true);
     case 'chat-delete': return groupDeleteAsk();
+    case 'chat-dm-delete': return dmDeleteAsk();
     case 'chat-voice-play': return voicePlay(el.dataset.fid);
     default: return chatAction(a, el, ev);
   }
@@ -281,6 +296,41 @@ async function groupDelete(c) {
     await docRef(`chat/${c.id}`).delete();
     S.ui.chat = null; CHAT.openId = null; CHAT.unsub?.(); CHAT.unsub = null;
   }, 'Group deleted');
+}
+
+/* ── delete a direct chat for yourself: hides everything up to now from your chats (on all your devices).
+   Nothing shared is removed — the other person keeps the whole conversation, and a new message brings the chat back. ── */
+function dmDeleteAsk() {
+  const c = myChats().find((x) => x.id === CHAT.openId);
+  if (!c || c.kind !== 'dm') return toast('Only direct chats can be deleted this way.', 'warn');
+  return confirmBox(`Delete your chat with ${c.title}?`, `The conversation is removed from your chats on all your devices. ${c.title} still keeps their copy. If either of you sends a new message, the chat comes back with only the new messages.`, () => dmDelete(c));
+}
+async function dmDelete(c) {
+  if (!S.uid) fail('Sign in with your own account to delete chats.');
+  if (CHAT.openId !== c.id || CHAT.loadedFor !== c.id) fail('Messages are still loading — try again in a moment.');
+  // marks by position, not time: each bucket's last entry right now, the latest message, and the pins/notifications so far.
+  // Anyone's clock being off can't hide a later message, because later messages are always appended after these marks.
+  const old = clearedOf(c.id) || {}, now = CHAT.list.find((x) => x.id === c.id) || c;
+  // marks for months that can no longer be loaded are dropped (the loaded window only moves forward), keeping the record small
+  const pm = addDays(today().slice(0, 7) + '-01', -1).slice(0, 7);
+  const n = Object.fromEntries(Object.entries(old.n || {}).filter(([k]) => k.slice(0, 7) >= pm));
+  let pend = null;
+  for (const b of CHAT.buckets) {
+    const msgs = b.msgs || [], tail = msgs[msgs.length - 1];
+    if (tail) n[b.id] = [msgs.length, tail.id, Number(tail.at) || 0];
+    // a message whose "last" update hasn't landed yet: remember it too, so when it lands the chat doesn't reappear empty
+    const top = msgs.filter((m) => !m.react).pop();
+    if (top && (Number(top.at) || 0) > Math.max(Number(now.last?.at) || 0, pend?.at || 0)) pend = { at: Number(top.at) || 0, by: b.by };
+  }
+  const nt = [...new Set([...(old.nt || []), ...S.ntf.filter((x) => x.go?.chat === c.id).map((x) => x.id)])].slice(-300);
+  const entry = { at: Date.now(), n, last: lastSig(now.last), p: (now.pins || []).map((p) => p.id), nt };
+  if (pend) entry.pend = lastSig(pend);
+  const ref = S.db.doc(`data/users/${S.uid}/cleared`);
+  // update merges on the server, so deletions made on another device at the same moment are kept; set only creates the record
+  try { await ref.update({ [c.id]: entry }); } catch (e) { if (e?.code !== 'not_found') throw e; await ref.set({ ...CHAT.cleared, [c.id]: entry }); }
+  CHAT.cleared = { ...CHAT.cleared, [c.id]: entry };
+  if (CHAT.openId === c.id) { voiceStop(true); CH2.picker = null; CH2.editing = null; CHAT.replyTo = null; S.ui.chat = null; S.ui.chFind = ''; CHAT.unsub?.(); CHAT.unsub = null; CHAT.openId = null; }
+  schedule();
 }
 
 /* ── voice messages: recorded in the browser, sent as a chunked audio file, played inline ── */
@@ -478,7 +528,14 @@ function cmdkRun(it) {
 .rxs{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
 .rxp{border:1px solid var(--line);background:var(--surface);border-radius:99px;padding:0 8px;font-size:.8rem;cursor:pointer;line-height:1.7}
 .rxp.on{border-color:var(--c-sky);background:color-mix(in srgb,var(--c-sky) 14%,var(--surface))}
-.rxp.add{color:var(--muted)}
+/* Reactions: one subtle button beside each bubble opens the picker; nothing emoji pops up on hover. */
+.msg-line{display:flex;align-items:flex-end;gap:4px;min-width:0;max-width:100%}
+.msg.theirs .msg-line{justify-self:start}
+.msg.mine .msg-line{justify-self:end;flex-direction:row-reverse}
+.msg-line .msg-body{flex:0 1 auto}
+.rx-btn{flex:none;display:inline-grid;place-items:center;width:26px;height:26px;padding:0;margin-bottom:2px;border:0;border-radius:50%;background:none;color:var(--muted);opacity:.4;cursor:pointer;transition:opacity .12s,background .12s}
+.msg:hover .rx-btn,.rx-btn:focus-visible,.rx-btn.on{opacity:1}
+.rx-btn:hover,.rx-btn.on{background:var(--sunk);color:var(--ink)}
 .rx-picker,.emo-pop{display:flex;flex-wrap:wrap;gap:2px;background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);padding:4px;margin-top:4px;width:max-content;max-width:100%}
 .rx-picker button,.emo-pop button{border:0;background:none;font-size:1.15rem;padding:3px 5px;border-radius:6px;cursor:pointer}.rx-picker button:hover,.emo-pop button:hover{background:var(--sunk)}
 .newline{display:flex;align-items:center;gap:8px;margin:8px 16px;color:var(--c-coral);font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em}

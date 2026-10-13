@@ -1,7 +1,7 @@
 // Tests for the complaint rules in server/complaints.js: anonymity, who can read what, who can change what, and input checks.
 // Run: node scripts/test-complaints.mjs
 import assert from 'node:assert/strict';
-import { ownerKeyFor, isComplaintStaff, isAssignable, canReadComplaint, complaintWriteProblem, buildComplaint, CATEGORIES, SLA_MS } from '../server/complaints.js';
+import { ownerKeyFor, isComplaintStaffCtx, isAssignableCtx, canReadComplaint, complaintWriteProblem, buildComplaint, CATEGORIES, SLA_MS } from '../server/complaints.js';
 
 process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'test-secret-for-complaint-rules-only-0123456789';
 const NOW = 1760000000000;
@@ -158,31 +158,47 @@ test('categories cover the requested grievance types', () => {
   for (const c of ['Harassment', 'Discrimination', 'Safety', 'Pay or benefits']) assert.ok(CATEGORIES.includes(c));
 });
 
-const fakeDb = ({ headIds = [], reports = [], emps = {} } = {}) => async (sql, params) => {
-  if (sql.includes("data->>'managerId'")) return { rowCount: reports.includes(params[0]) ? 1 : 0, rows: [] };
-  if (sql.includes('FROM docs WHERE path')) {
-    const e = emps[params[0].slice(4)];
-    return e ? { rowCount: 1, rows: [{ data: e }] } : { rowCount: 0, rows: [] };
-  }
-  throw new Error('unexpected query: ' + sql.slice(0, 60));
-};
+// Access context as server/access.js builds it: employee records (Map by id) and the department list.
+const ctxOf = ({ emps = [], depts = [] } = {}) => ({ emps: new Map(emps.map((e) => [e.id, e])), depts });
+const who = (empId, role) => ({ empId, role, active: true });
+const check = (name, actual, expected) => { assert.equal(actual, expected, name); n++; console.log('ok -', name); };
+const plain = { id: 'E3', role: 'EMPLOYEE', active: true };
+const deptHead = ctxOf({ emps: [{ id: 'E9', role: 'EMPLOYEE', active: true }], depts: [{ id: 'd1', headId: 'E9' }] });
+const withReports = ctxOf({ emps: [plain, { id: 'E6', role: 'EMPLOYEE', active: true }, { id: 'E10', role: 'EMPLOYEE', managerId: 'E6', active: true }] });
+check('an employee with nothing is not staff', isComplaintStaffCtx(who('E3', 'EMPLOYEE'), ctxOf({ emps: [plain] })), false);
+check('HR is staff', isComplaintStaffCtx(who('E2', 'HR'), ctxOf()), true);
+check('a manager is staff', isComplaintStaffCtx(who('E7', 'MANAGER'), ctxOf()), true);
+check('a department head is staff', isComplaintStaffCtx(who('E9', 'EMPLOYEE'), deptHead), true);
+check('an employee with direct reports is staff', isComplaintStaffCtx(who('E6', 'EMPLOYEE'), withReports), true);
+check('an employee whose only report has left is not staff', isComplaintStaffCtx(who('E7', 'EMPLOYEE'), ctxOf({ emps: [{ id: 'E11', managerId: 'E7', role: 'EMPLOYEE', active: false }] })), false);
+check('an inactive person is never staff', isComplaintStaffCtx({ empId: 'E2', role: 'HR', active: false }, ctxOf()), false);
+check('HR can be assigned complaints', isAssignableCtx('E2', ctxOf({ emps: [{ id: 'E2', role: 'HR', active: true }] })), true);
+check('a plain employee cannot be assigned', isAssignableCtx('E3', ctxOf({ emps: [plain] })), false);
+check('a missing record cannot be assigned', isAssignableCtx('E8', ctxOf()), false);
 
-await (async () => {
-  const cfgDoc = { depts: [{ id: 'd1', headId: 'E9' }] };
-  const who = (empId, role) => ({ empId, role, active: true });
-  const check = async (name, actual, expected) => {
-    assert.equal(actual, expected, name);
-    n++; console.log('ok -', name);
-  };
-  await check('an employee with nothing is not staff', await isComplaintStaff(who('E3', 'EMPLOYEE'), fakeDb(), cfgDoc), false);
-  await check('HR is staff', await isComplaintStaff(who('E2', 'HR'), fakeDb(), cfgDoc), true);
-  await check('a manager is staff', await isComplaintStaff(who('E7', 'MANAGER'), fakeDb(), cfgDoc), true);
-  await check('a department head is staff', await isComplaintStaff(who('E9', 'EMPLOYEE'), fakeDb(), cfgDoc), true);
-  await check('an employee with direct reports is staff', await isComplaintStaff(who('E6', 'EMPLOYEE'), fakeDb({ reports: ['E6'] }), cfgDoc), true);
-  await check('an inactive person is never staff', await isComplaintStaff({ empId: 'E2', role: 'HR', active: false }, fakeDb(), cfgDoc), false);
-  await check('HR can be assigned complaints', await isAssignable('E2', fakeDb({ emps: { E2: { role: 'HR', active: true } } }), cfgDoc), true);
-  await check('a plain employee cannot be assigned', await isAssignable('E3', fakeDb({ emps: { E3: { role: 'EMPLOYEE', active: true } } }), cfgDoc), false);
-  await check('a missing record cannot be assigned', await isAssignable('E8', fakeDb(), cfgDoc), false);
-})();
+// Through the real access layer (server/access.js), as the sync and single-record reads use it.
+const { buildCtx, accessFor, canReadDoc } = await import('../server/access.js');
+const rows = [
+  { path: 'cfg/main', data: { depts: [{ id: 'd1', headId: 'E9' }] } },
+  { path: 'emp/E2', data: { role: 'HR', active: true, deptId: 'd1' } },
+  { path: 'emp/E3', data: { role: 'EMPLOYEE', active: true, deptId: 'd1' } },
+  { path: 'emp/E4', data: { role: 'EMPLOYEE', active: true, deptId: 'd1' } },
+  { path: 'emp/E9', data: { role: 'EMPLOYEE', active: true, deptId: 'd1' } },
+];
+const ctx = buildCtx(rows);
+const session = (empId, role, extra = {}) => ({ uid: 'u' + empId, empId, role, active: true, admin: role === 'ADMIN', hr: ['ADMIN', 'HR'].includes(role), ...extra });
+const cmp = { path: 'complaint/x1', data: { ownerKey: ownerKeyFor('E3'), subject: 's' } };
+const sec = { path: 'complaintsecret/x1', data: { by: 'E3', at: 1 } };
+const file = { path: 'complaintfile/fid_0', data: { fid: 'fid', i: 0, n: 1, data: 'x' } };
+check('HR reads a complaint through access.js', canReadDoc(cmp.path, cmp.data, accessFor(session('E2', 'HR'), ctx)), true);
+check('the owner reads their complaint through access.js', canReadDoc(cmp.path, cmp.data, accessFor(session('E3', 'EMPLOYEE'), ctx)), true);
+check('another employee cannot read it through access.js', canReadDoc(cmp.path, cmp.data, accessFor(session('E4', 'EMPLOYEE'), ctx)), false);
+check('a department head (not HR) is staff through access.js', canReadDoc(cmp.path, cmp.data, accessFor(session('E9', 'EMPLOYEE'), ctx)), true);
+check('HR cannot read the complainant record through access.js', canReadDoc(sec.path, sec.data, accessFor(session('E2', 'HR'), ctx)), false);
+check('an administrator reads the complainant record through access.js', canReadDoc(sec.path, sec.data, accessFor(session('E1', 'ADMIN'), ctx)), true);
+check('attachments are not readable by an ordinary employee through access.js', canReadDoc(file.path, file.data, accessFor(session('E3', 'EMPLOYEE'), ctx)), false);
+check('attachments are readable by HR through access.js', canReadDoc(file.path, file.data, accessFor(session('E2', 'HR'), ctx)), true);
+const sigStaff = accessFor(session('E2', 'HR'), ctx).sig, sigEmp = accessFor(session('E3', 'EMPLOYEE'), ctx).sig;
+check('the sync scope changes when complaint access changes', sigStaff !== sigEmp, true);
 
 console.log(`\n${n} tests passed`);
