@@ -55,14 +55,15 @@ function mentionsOf(text, c) {
 
 /* ── the chat page ── */
 function vChats2() {
-  const chats = myChats(), q = ui('chQ', '').toLowerCase(), on = onlineIds(), fav = new Set(CHAT.reads._fav || []);
+  // a deleted direct chat you reopened shows no old preview
+  const chats = myChats().map((c) => (c.kind === 'dm' && nothingNew(c) ? { ...c, last: null } : c)), q = ui('chQ', '').toLowerCase(), on = onlineIds(), fav = new Set(CHAT.reads._fav || []);
   let openId = S.ui.chat || CHAT.openId;
   const mentionsView = openId === '@mentions';
   if (openId && !mentionsView && !chats.some((c) => c.id === openId)) openId = null;
   if (openId && !mentionsView) openChat(openId); else { CHAT.unsub?.(); CHAT.unsub = null; CHAT.openId = null; }
   if (openId !== CH2.seenFor) { CH2.seenFor = openId; CH2.seenAt = CHAT.reads[openId] || 0; CH2.editing = null; CH2.pop = null; }
   setPresence({ chat: mentionsView ? null : openId || null });
-  const ments = S.ntf.filter((n) => n.go?.chat && /mentioned you|replied to you/.test(n.title));
+  const ments = S.ntf.filter((n) => n.go?.chat && /mentioned you|replied to you/.test(n.title) && !(clearedOf(n.go.chat)?.nt || []).includes(n.id));
   const unM = ments.filter((n) => !n.read).length;
   const list = chats.filter((c) => !q || c.title.toLowerCase().includes(q)).sort((a, b) => (b.last?.at || 0) - (a.last?.at || 0) || a.title.localeCompare(b.title));
   const item = (c) => { const other = c.kind === 'dm' ? (c.members || []).find((x) => x !== S.me.id) : null; const typ = typingIn(c.id);
@@ -82,7 +83,7 @@ function vChats2() {
   }
   const c = chats.find((x) => x.id === openId);
   if (c) {
-    const msgs = messagesOf(), fq = ui('chFind', '').toLowerCase(), tab = ui('chTab', 'msgs'), members = chatMembers(c), pins = c.pins || [];
+    const msgs = messagesOf(), fq = ui('chFind', '').toLowerCase(), tab = ui('chTab', 'msgs'), members = chatMembers(c), pins = (c.pins || []).filter((p) => !(clearedOf(c.id)?.p || []).includes(p.id));
     const other = c.kind === 'dm' ? (c.members || []).find((x) => x !== S.me.id) : null, typ = typingIn(c.id);
     let body = '';
     if (tab === 'files') {
@@ -137,6 +138,7 @@ function vChats2() {
         <div class="grow" style="min-width:0"><b class="trunc" style="display:block">${esc(c.title)}</b><span class="tiny ${typ.length ? 'typing-t' : 'muted'}">${typ.length ? `${esc(typ.join(', '))} ${typ.length > 1 ? 'are' : 'is'} typing…` : c.kind === 'dm' ? `${esc(empById(other)?.designation || '')}${on.has(other) ? ' · <span class="on-t">online</span>' : ''}` : `${members.length} members · ${members.filter((x) => on.has(x)).length} online${c.kind === 'dept' ? ' · department' : c.kind === 'all' ? ' · whole company' : ''}`}</span></div>
         <input class="i" id="ch-find" data-i="chFind" placeholder="Search · #tag" value="${esc(ui('chFind', ''))}" style="width:170px">
         <button class="btn ghost sm" data-a="chat-fav" title="${fav.has(c.id) ? 'Unstar' : 'Star'} this chat" aria-pressed="${fav.has(c.id)}">${fav.has(c.id) ? '★' : '☆'}</button>
+        ${c.kind === 'dm' ? '<button class="btn ghost sm" data-a="chat-dm-delete" title="Delete this chat for you" aria-label="Delete this chat">🗑</button>' : ''}
       </header>
       <div class="tabs chat-tabs">${[['msgs', 'Messages'], ['pins', `Pinned${pins.length ? ` (${pins.length})` : ''}`], ['files', `Files (${msgs.filter((m) => m.file && !m.deleted).length})`], ['members', `Members (${members.length})`]].map(([k, l]) => `<button class="tab" aria-selected="${tab === k}" data-a="ui" data-k="chTab" data-v="${k}">${l}</button>`).join('')}</div>
       ${body}
@@ -254,6 +256,7 @@ async function chatAction2(a, el, ev) {
     case 'chat-voice-send': return voiceStop(false);
     case 'chat-voice-cancel': return voiceStop(true);
     case 'chat-delete': return groupDeleteAsk();
+    case 'chat-dm-delete': return dmDeleteAsk();
     case 'chat-voice-play': return voicePlay(el.dataset.fid);
     default: return chatAction(a, el, ev);
   }
@@ -293,6 +296,41 @@ async function groupDelete(c) {
     await docRef(`chat/${c.id}`).delete();
     S.ui.chat = null; CHAT.openId = null; CHAT.unsub?.(); CHAT.unsub = null;
   }, 'Group deleted');
+}
+
+/* ── delete a direct chat for yourself: hides everything up to now from your chats (on all your devices).
+   Nothing shared is removed — the other person keeps the whole conversation, and a new message brings the chat back. ── */
+function dmDeleteAsk() {
+  const c = myChats().find((x) => x.id === CHAT.openId);
+  if (!c || c.kind !== 'dm') return toast('Only direct chats can be deleted this way.', 'warn');
+  return confirmBox(`Delete your chat with ${c.title}?`, `The conversation is removed from your chats on all your devices. ${c.title} still keeps their copy. If either of you sends a new message, the chat comes back with only the new messages.`, () => dmDelete(c));
+}
+async function dmDelete(c) {
+  if (!S.uid) fail('Sign in with your own account to delete chats.');
+  if (CHAT.openId !== c.id || CHAT.loadedFor !== c.id) fail('Messages are still loading — try again in a moment.');
+  // marks by position, not time: each bucket's last entry right now, the latest message, and the pins/notifications so far.
+  // Anyone's clock being off can't hide a later message, because later messages are always appended after these marks.
+  const old = clearedOf(c.id) || {}, now = CHAT.list.find((x) => x.id === c.id) || c;
+  // marks for months that can no longer be loaded are dropped (the loaded window only moves forward), keeping the record small
+  const pm = addDays(today().slice(0, 7) + '-01', -1).slice(0, 7);
+  const n = Object.fromEntries(Object.entries(old.n || {}).filter(([k]) => k.slice(0, 7) >= pm));
+  let pend = null;
+  for (const b of CHAT.buckets) {
+    const msgs = b.msgs || [], tail = msgs[msgs.length - 1];
+    if (tail) n[b.id] = [msgs.length, tail.id, Number(tail.at) || 0];
+    // a message whose "last" update hasn't landed yet: remember it too, so when it lands the chat doesn't reappear empty
+    const top = msgs.filter((m) => !m.react).pop();
+    if (top && (Number(top.at) || 0) > Math.max(Number(now.last?.at) || 0, pend?.at || 0)) pend = { at: Number(top.at) || 0, by: b.by };
+  }
+  const nt = [...new Set([...(old.nt || []), ...S.ntf.filter((x) => x.go?.chat === c.id).map((x) => x.id)])].slice(-300);
+  const entry = { at: Date.now(), n, last: lastSig(now.last), p: (now.pins || []).map((p) => p.id), nt };
+  if (pend) entry.pend = lastSig(pend);
+  const ref = S.db.doc(`data/users/${S.uid}/cleared`);
+  // update merges on the server, so deletions made on another device at the same moment are kept; set only creates the record
+  try { await ref.update({ [c.id]: entry }); } catch (e) { if (e?.code !== 'not_found') throw e; await ref.set({ ...CHAT.cleared, [c.id]: entry }); }
+  CHAT.cleared = { ...CHAT.cleared, [c.id]: entry };
+  if (CHAT.openId === c.id) { voiceStop(true); CH2.picker = null; CH2.editing = null; CHAT.replyTo = null; S.ui.chat = null; S.ui.chFind = ''; CHAT.unsub?.(); CHAT.unsub = null; CHAT.openId = null; }
+  schedule();
 }
 
 /* ── voice messages: recorded in the browser, sent as a chunked audio file, played inline ── */

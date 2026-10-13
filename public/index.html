@@ -1895,8 +1895,11 @@ function ntfModal() {
    message bucket chat/{id}/b/{YYYY-MM}_{empId}[_n], so simultaneous senders never overwrite
    each other. Files go to the artifact's file store when the type is supported there, otherwise
    they are split into chunk documents under blob/. Read positions live in each viewer's
-   private data/users/{uid}/prefs/reads document. */
-const CHAT = { list: [], reads: {}, openId: null, unsub: null, buckets: [], uploading: null, assets: undefined, blobUrls: {} };
+   private data/users/{uid}/prefs/reads document. Deleting a direct chat is per person: the private
+   data/users/{uid}/cleared document maps chat id → { at, n: {bucketId: [count, last entry id, its time]}, last, p: [pin ids],
+   nt: [notification ids] } at the moment of deletion. Buckets only ever grow (deleted messages stay as "Message deleted"),
+   so the marks show exactly what was deleted without trusting anyone's clock. The other person keeps the whole conversation. */
+const CHAT = { list: [], reads: {}, cleared: {}, openId: null, loadedFor: null, unsub: null, buckets: [], uploading: null, assets: undefined, blobUrls: {} };
 const ASSET_TYPES = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', webm: 'video/webm', csv: 'text/csv', txt: 'text/plain', md: 'text/markdown', json: 'application/json' };
 const CHUNK_TYPES = ['xlsx', 'docx', 'pptx', 'zip', 'pdf', 'csv', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'txt', 'json', 'md'];
 const MAX_FILE = 20 * 1024 * 1024, MAX_CHUNKED = 6 * 1024 * 1024, CHUNK = 190 * 1024;
@@ -1913,27 +1916,42 @@ function myChats() {
   const out = [];
   out.push({ id: 'all', kind: 'all', name: 'Everyone', ...(CHAT.list.find((c) => c.id === 'all') || {}) });
   for (const d of cfg().depts) { const id = 'dept-' + d.id; out.push({ id, kind: 'dept', deptId: d.id, name: d.name, ...(CHAT.list.find((c) => c.id === id) || {}) }); }
-  for (const c of CHAT.list) if ((c.kind === 'group' || c.kind === 'dm') && !c.archived) out.push(c);
+  // a direct chat you deleted stays hidden until a newer message arrives, or you open it again ("Message a person")
+  for (const c of CHAT.list) if ((c.kind === 'group' || c.kind === 'dm') && !c.archived && !(c.kind === 'dm' && dmHidden(c))) out.push(c);
   return out.filter(inChat).map((c) => ({ ...c, title: chatTitle(c) }));
 }
 function chatTitle(c) {
   if (c.kind === 'dm') { const other = (c.members || []).find((m) => m !== S.me.id); return nameOf(other); }
   return c.name;
 }
-const unreadIn = (c) => !!(c.last && c.last.by !== S.me.id && c.last.at > (CHAT.reads[c.id] || 0));
+const clearedOf = (id) => { const x = CHAT.cleared[id]; return x && typeof x === 'object' ? x : null; };
+const lastSig = (l) => (l ? `${l.at}|${l.by}` : '');
+// a bucket's deletion mark is [count, id of its last entry, that entry's time]; returns whether entry i is hidden
+function hiddenAt(mark, msgs, i) {
+  if (!Array.isArray(mark)) return false;
+  const k = msgs.findIndex((m) => m.id === mark[1]);
+  if (k >= 0) return i <= k;
+  // the marked entry is gone (the bucket was rewritten from an out-of-date copy): fall back to position and time together
+  return i < mark[0] && (Number(msgs[i].at) || 0) <= mark[2];
+}
+// true while the chat's latest message is still the one it had when you deleted it
+const nothingNew = (c) => { const x = clearedOf(c.id); if (!x) return false; const s = lastSig(c.last); return s === (x.last || '') || (!!x.pend && s === x.pend); };
+const dmHidden = (c) => nothingNew(c) && S.ui.chat !== c.id;
+const unreadIn = (c) => !!(c.last && c.last.by !== S.me.id && c.last.at > (CHAT.reads[c.id] || 0) && !nothingNew(c));
 const unreadCount = () => myChats().filter(unreadIn).length;
 
 /* ── subscriptions ── */
 function chatSubscribe() {
   subscribe('chat', S.db.collection('chat'), (q) => { CHAT.list = docsOf(q); });
   if (S.uid) S.db.doc(`data/users/${S.uid}/reads`).onSnapshot((s) => { CHAT.reads = s.exists ? { ...s.data() } : {}; schedule(); }, () => {});
+  if (S.uid) S.db.doc(`data/users/${S.uid}/cleared`).onSnapshot((s) => { CHAT.cleared = s.exists ? { ...s.data() } : {}; schedule(); }, () => {});
   window.claude.use('assets').then((a) => { CHAT.assets = a || null; }).catch(() => { CHAT.assets = null; });
 }
 function openChat(id) {
   if (CHAT.openId === id && CHAT.unsub) return;
   CHAT.unsub?.(); CHAT.buckets = []; CHAT.openId = id; CHAT.stick = true;
   const m = today().slice(0, 7), pm = addDays(m + '-01', -1).slice(0, 7);
-  CHAT.unsub = S.db.collection(`chat/${id}/b`).where('month', 'in', [pm, m]).onSnapshot((q) => { CHAT.buckets = docsOf(q); markRead(id); schedule(); }, () => toast('Messages stopped updating — reload the page.', 'warn'));
+  CHAT.unsub = S.db.collection(`chat/${id}/b`).where('month', 'in', [pm, m]).onSnapshot((q) => { CHAT.buckets = docsOf(q); CHAT.loadedFor = id; markRead(id); schedule(); }, () => toast('Messages stopped updating — reload the page.', 'warn'));
   markRead(id);
 }
 let readT = 0;
@@ -1948,7 +1966,9 @@ function markRead(id) {
 function messagesOf() {
   const all = [];
   const reacts = [];
-  for (const b of CHAT.buckets) for (const m of b.msgs || []) { if (m.react) reacts.push({ ...m, by: b.by }); else all.push({ ...m, by: b.by, bucket: b.id }); }
+  // a direct chat you deleted hides the entries each bucket had then — only in your view; the buckets themselves are untouched
+  const cut = clearedOf(CHAT.openId)?.n || {};
+  for (const b of CHAT.buckets) (b.msgs || []).forEach((m, i, msgs) => { if (hiddenAt(cut[b.id], msgs, i)) return; if (m.react) reacts.push({ ...m, by: b.by }); else all.push({ ...m, by: b.by, bucket: b.id }); });
   all.sort((a, b) => a.at - b.at);
   for (const r of reacts) { const t = all.find((m) => m.id === r.react.to); if (t) { t.reacts = t.reacts || {}; t.reacts[r.by] = r.react.e; } }
   return all;
@@ -3294,14 +3314,15 @@ function mentionsOf(text, c) {
 
 /* ── the chat page ── */
 function vChats2() {
-  const chats = myChats(), q = ui('chQ', '').toLowerCase(), on = onlineIds(), fav = new Set(CHAT.reads._fav || []);
+  // a deleted direct chat you reopened shows no old preview
+  const chats = myChats().map((c) => (c.kind === 'dm' && nothingNew(c) ? { ...c, last: null } : c)), q = ui('chQ', '').toLowerCase(), on = onlineIds(), fav = new Set(CHAT.reads._fav || []);
   let openId = S.ui.chat || CHAT.openId;
   const mentionsView = openId === '@mentions';
   if (openId && !mentionsView && !chats.some((c) => c.id === openId)) openId = null;
   if (openId && !mentionsView) openChat(openId); else { CHAT.unsub?.(); CHAT.unsub = null; CHAT.openId = null; }
   if (openId !== CH2.seenFor) { CH2.seenFor = openId; CH2.seenAt = CHAT.reads[openId] || 0; CH2.editing = null; CH2.pop = null; }
   setPresence({ chat: mentionsView ? null : openId || null });
-  const ments = S.ntf.filter((n) => n.go?.chat && /mentioned you|replied to you/.test(n.title));
+  const ments = S.ntf.filter((n) => n.go?.chat && /mentioned you|replied to you/.test(n.title) && !(clearedOf(n.go.chat)?.nt || []).includes(n.id));
   const unM = ments.filter((n) => !n.read).length;
   const list = chats.filter((c) => !q || c.title.toLowerCase().includes(q)).sort((a, b) => (b.last?.at || 0) - (a.last?.at || 0) || a.title.localeCompare(b.title));
   const item = (c) => { const other = c.kind === 'dm' ? (c.members || []).find((x) => x !== S.me.id) : null; const typ = typingIn(c.id);
@@ -3321,7 +3342,7 @@ function vChats2() {
   }
   const c = chats.find((x) => x.id === openId);
   if (c) {
-    const msgs = messagesOf(), fq = ui('chFind', '').toLowerCase(), tab = ui('chTab', 'msgs'), members = chatMembers(c), pins = c.pins || [];
+    const msgs = messagesOf(), fq = ui('chFind', '').toLowerCase(), tab = ui('chTab', 'msgs'), members = chatMembers(c), pins = (c.pins || []).filter((p) => !(clearedOf(c.id)?.p || []).includes(p.id));
     const other = c.kind === 'dm' ? (c.members || []).find((x) => x !== S.me.id) : null, typ = typingIn(c.id);
     let body = '';
     if (tab === 'files') {
@@ -3376,6 +3397,7 @@ function vChats2() {
         <div class="grow" style="min-width:0"><b class="trunc" style="display:block">${esc(c.title)}</b><span class="tiny ${typ.length ? 'typing-t' : 'muted'}">${typ.length ? `${esc(typ.join(', '))} ${typ.length > 1 ? 'are' : 'is'} typing…` : c.kind === 'dm' ? `${esc(empById(other)?.designation || '')}${on.has(other) ? ' · <span class="on-t">online</span>' : ''}` : `${members.length} members · ${members.filter((x) => on.has(x)).length} online${c.kind === 'dept' ? ' · department' : c.kind === 'all' ? ' · whole company' : ''}`}</span></div>
         <input class="i" id="ch-find" data-i="chFind" placeholder="Search · #tag" value="${esc(ui('chFind', ''))}" style="width:170px">
         <button class="btn ghost sm" data-a="chat-fav" title="${fav.has(c.id) ? 'Unstar' : 'Star'} this chat" aria-pressed="${fav.has(c.id)}">${fav.has(c.id) ? '★' : '☆'}</button>
+        ${c.kind === 'dm' ? '<button class="btn ghost sm" data-a="chat-dm-delete" title="Delete this chat for you" aria-label="Delete this chat">🗑</button>' : ''}
       </header>
       <div class="tabs chat-tabs">${[['msgs', 'Messages'], ['pins', `Pinned${pins.length ? ` (${pins.length})` : ''}`], ['files', `Files (${msgs.filter((m) => m.file && !m.deleted).length})`], ['members', `Members (${members.length})`]].map(([k, l]) => `<button class="tab" aria-selected="${tab === k}" data-a="ui" data-k="chTab" data-v="${k}">${l}</button>`).join('')}</div>
       ${body}
@@ -3493,6 +3515,7 @@ async function chatAction2(a, el, ev) {
     case 'chat-voice-send': return voiceStop(false);
     case 'chat-voice-cancel': return voiceStop(true);
     case 'chat-delete': return groupDeleteAsk();
+    case 'chat-dm-delete': return dmDeleteAsk();
     case 'chat-voice-play': return voicePlay(el.dataset.fid);
     default: return chatAction(a, el, ev);
   }
@@ -3532,6 +3555,41 @@ async function groupDelete(c) {
     await docRef(`chat/${c.id}`).delete();
     S.ui.chat = null; CHAT.openId = null; CHAT.unsub?.(); CHAT.unsub = null;
   }, 'Group deleted');
+}
+
+/* ── delete a direct chat for yourself: hides everything up to now from your chats (on all your devices).
+   Nothing shared is removed — the other person keeps the whole conversation, and a new message brings the chat back. ── */
+function dmDeleteAsk() {
+  const c = myChats().find((x) => x.id === CHAT.openId);
+  if (!c || c.kind !== 'dm') return toast('Only direct chats can be deleted this way.', 'warn');
+  return confirmBox(`Delete your chat with ${c.title}?`, `The conversation is removed from your chats on all your devices. ${c.title} still keeps their copy. If either of you sends a new message, the chat comes back with only the new messages.`, () => dmDelete(c));
+}
+async function dmDelete(c) {
+  if (!S.uid) fail('Sign in with your own account to delete chats.');
+  if (CHAT.openId !== c.id || CHAT.loadedFor !== c.id) fail('Messages are still loading — try again in a moment.');
+  // marks by position, not time: each bucket's last entry right now, the latest message, and the pins/notifications so far.
+  // Anyone's clock being off can't hide a later message, because later messages are always appended after these marks.
+  const old = clearedOf(c.id) || {}, now = CHAT.list.find((x) => x.id === c.id) || c;
+  // marks for months that can no longer be loaded are dropped (the loaded window only moves forward), keeping the record small
+  const pm = addDays(today().slice(0, 7) + '-01', -1).slice(0, 7);
+  const n = Object.fromEntries(Object.entries(old.n || {}).filter(([k]) => k.slice(0, 7) >= pm));
+  let pend = null;
+  for (const b of CHAT.buckets) {
+    const msgs = b.msgs || [], tail = msgs[msgs.length - 1];
+    if (tail) n[b.id] = [msgs.length, tail.id, Number(tail.at) || 0];
+    // a message whose "last" update hasn't landed yet: remember it too, so when it lands the chat doesn't reappear empty
+    const top = msgs.filter((m) => !m.react).pop();
+    if (top && (Number(top.at) || 0) > Math.max(Number(now.last?.at) || 0, pend?.at || 0)) pend = { at: Number(top.at) || 0, by: b.by };
+  }
+  const nt = [...new Set([...(old.nt || []), ...S.ntf.filter((x) => x.go?.chat === c.id).map((x) => x.id)])].slice(-300);
+  const entry = { at: Date.now(), n, last: lastSig(now.last), p: (now.pins || []).map((p) => p.id), nt };
+  if (pend) entry.pend = lastSig(pend);
+  const ref = S.db.doc(`data/users/${S.uid}/cleared`);
+  // update merges on the server, so deletions made on another device at the same moment are kept; set only creates the record
+  try { await ref.update({ [c.id]: entry }); } catch (e) { if (e?.code !== 'not_found') throw e; await ref.set({ ...CHAT.cleared, [c.id]: entry }); }
+  CHAT.cleared = { ...CHAT.cleared, [c.id]: entry };
+  if (CHAT.openId === c.id) { voiceStop(true); CH2.picker = null; CH2.editing = null; CHAT.replyTo = null; S.ui.chat = null; S.ui.chFind = ''; CHAT.unsub?.(); CHAT.unsub = null; CHAT.openId = null; }
+  schedule();
 }
 
 /* ── voice messages: recorded in the browser, sent as a chunked audio file, played inline ── */
