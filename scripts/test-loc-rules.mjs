@@ -1,11 +1,16 @@
 // Tests who may read and write WFH / official-duty location records (server/loc-rules.js). Run: node scripts/test-loc-rules.mjs
 import assert from 'node:assert/strict';
-import { locEmpOf, locVisible, locWriteProblem, seesAllLocations, LOCATION_VIEWER_ROLES, LIVE_STOPPED } from '../server/loc-rules.js';
+import { locEmpOf, locVisible, locWriteProblem, seesAllLocations, LOCATION_VIEWER_ROLES, LIVE_STOPPED, LIVE_EXPIRED, LIVE_MAX_MS, liveExpired } from '../server/loc-rules.js';
 
 // Only Admin, HR and Manager accounts see other people's locations; everyone sees their own.
 const as = (empId, role = 'EMPLOYEE', extra = {}) => ({ empId, role, active: true, ...extra });
 const can = (s, owner) => locVisible(`loc/${owner}_2026-10-13`, s);
 const rec = (empId, o = {}) => ({ empId, date: '2026-10-13', kind: 'WFH', last: 1, pings: [{ t: 1, lat: 1, lng: 2 }], ...o });
+// a fixed clock for the live-sharing tests, so the 8-hour window is exact
+const NOW = Date.parse('2026-10-13T10:00:00Z');
+const H = 3600000, MIN = 60000;
+const P = 'loc/EMP_2026-10-13';
+const live = (o) => ({ on: true, since: NOW, every: 10, consentAt: NOW, run: 'r1', ...o });
 
 let n = 0;
 const test = (name, fn) => { fn(); n++; console.log('ok -', name); };
@@ -41,33 +46,64 @@ test('inactive accounts see nothing — not even with a viewer role', () => {
 });
 
 test('only the employee can write their own location records', () => {
-  assert.equal(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('EMP'), null, as('EMP')), null);
-  assert.equal(locWriteProblem('update', 'loc/EMP_2026-10-13', { last: 2 }, rec('EMP'), as('EMP')), null);
-  assert.equal(locWriteProblem('delete', 'loc/EMP_2026-10-13', undefined, rec('EMP'), as('EMP')), null);
-  assert.notEqual(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('EMP'), null, as('MGR')), null, 'manager');
-  assert.notEqual(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('EMP'), null, as('ADMIN', 'ADMIN')), null, 'admin');
-  assert.notEqual(locWriteProblem('delete', 'loc/EMP_2026-10-13', undefined, rec('EMP'), as('HR', 'HR')), null, 'HR delete');
-  assert.notEqual(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('MGR'), null, as('EMP')), null, 'record naming someone else');
-  assert.notEqual(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('EMP', { date: '2026-10-12' }), null, as('EMP')), null, 'wrong date');
-  assert.notEqual(locWriteProblem('set', 'loc/EMP', rec('EMP'), null, as('EMP')), null, 'bad path');
-  assert.notEqual(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('EMP'), null, {}), null, 'no employee');
+  assert.equal(locWriteProblem('set', P, rec('EMP'), null, as('EMP'), NOW), null);
+  assert.equal(locWriteProblem('update', P, { last: 2 }, rec('EMP'), as('EMP'), NOW), null);
+  assert.equal(locWriteProblem('delete', P, undefined, rec('EMP'), as('EMP'), NOW), null);
+  assert.notEqual(locWriteProblem('set', P, rec('EMP'), null, as('MGR'), NOW), null, 'manager');
+  assert.notEqual(locWriteProblem('set', P, rec('EMP'), null, as('ADMIN', 'ADMIN'), NOW), null, 'admin');
+  assert.notEqual(locWriteProblem('delete', P, undefined, rec('EMP'), as('HR', 'HR'), NOW), null, 'HR delete');
+  assert.notEqual(locWriteProblem('set', P, rec('MGR'), null, as('EMP'), NOW), null, 'record naming someone else');
+  assert.notEqual(locWriteProblem('set', P, rec('EMP', { date: '2026-10-12' }), null, as('EMP'), NOW), null, 'wrong date');
+  assert.notEqual(locWriteProblem('set', 'loc/EMP', rec('EMP'), null, as('EMP'), NOW), null, 'bad path');
+  assert.notEqual(locWriteProblem('set', P, rec('EMP'), null, {}, NOW), null, 'no employee');
 });
 
 test('live sharing needs recorded consent and a well-formed state', () => {
-  const ok = { on: true, since: 5, every: 10, consentAt: 4 };
-  assert.equal(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('EMP', { live: ok }), null, as('EMP')), null);
-  assert.equal(locWriteProblem('update', 'loc/EMP_2026-10-13', { live: { ...ok, on: false, stoppedAt: 9 } }, rec('EMP', { live: ok }), as('EMP')), null);
-  assert.notEqual(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('EMP', { live: { on: true, since: 5, every: 10 } }), null, as('EMP')), null, 'no consent');
-  assert.notEqual(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('EMP', { live: { ...ok, on: 'yes' } }), null, as('EMP')), null);
-  assert.notEqual(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('EMP', { live: { ...ok, every: -1 } }), null, as('EMP')), null);
-  assert.notEqual(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('EMP', { pings: 'x' }), null, as('EMP')), null);
+  assert.equal(locWriteProblem('set', P, rec('EMP', { live: live() }), null, as('EMP'), NOW), null);
+  assert.equal(locWriteProblem('update', P, { live: live({ on: false, stoppedAt: NOW + 1 }) }, rec('EMP', { live: live() }), as('EMP'), NOW), null);
+  assert.notEqual(locWriteProblem('set', P, rec('EMP', { live: { on: true, since: NOW, every: 10, run: 'r1' } }), null, as('EMP'), NOW), null, 'no consent');
+  assert.notEqual(locWriteProblem('set', P, rec('EMP', { live: live({ on: 'yes' }) }), null, as('EMP'), NOW), null);
+  assert.notEqual(locWriteProblem('set', P, rec('EMP', { live: live({ every: -1 }) }), null, as('EMP'), NOW), null);
+  assert.notEqual(locWriteProblem('set', P, rec('EMP', { pings: 'x' }), null, as('EMP'), NOW), null);
 });
 
 test('a stopped sharing run cannot switch itself back on; a new Start can', () => {
-  const stopped = rec('EMP', { live: { on: false, since: 5, every: 10, consentAt: 4, run: 'r1', stoppedAt: 9 } });
-  assert.equal(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('EMP', { live: { on: true, since: 5, every: 10, consentAt: 4, run: 'r1' } }), stopped, as('EMP')), LIVE_STOPPED);
-  assert.equal(locWriteProblem('set', 'loc/EMP_2026-10-13', rec('EMP', { live: { on: true, since: 3, every: 10, consentAt: 3, run: 'r2' } }), stopped, as('EMP')), null, 'new run, even with an earlier clock');
-  assert.equal(locWriteProblem('update', 'loc/EMP_2026-10-13', { last: 10 }, stopped, as('EMP')), null, 'other changes are fine');
+  const stopped = rec('EMP', { live: live({ on: false, stoppedAt: NOW - MIN }) });
+  assert.equal(locWriteProblem('set', P, rec('EMP', { live: live() }), stopped, as('EMP'), NOW), LIVE_STOPPED);
+  assert.equal(locWriteProblem('set', P, rec('EMP', { live: live({ run: 'r2', consentAt: NOW }) }), stopped, as('EMP'), NOW), null, 'a new Start now');
+  assert.equal(locWriteProblem('update', P, { last: NOW }, stopped, as('EMP'), NOW), null, 'other changes are fine');
+});
+
+test('a share lasts 8 hours from its start and no longer', () => {
+  assert.equal(LIVE_MAX_MS, 8 * H);
+  assert.equal(liveExpired(live(), NOW + 8 * H - 1), false, 'one millisecond before 8 hours');
+  assert.equal(liveExpired(live(), NOW + 8 * H), true, 'exactly 8 hours');
+  assert.equal(liveExpired(live({ on: false }), NOW + 9 * H), false, 'a stopped share is not "expired"');
+  const running = rec('EMP', { live: live() });
+  assert.equal(locWriteProblem('update', P, { last: NOW + 7 * H }, running, as('EMP'), NOW + 7 * H), null, 'sending inside the window');
+  assert.equal(locWriteProblem('update', P, { last: NOW + 8 * H, live: live() }, running, as('EMP'), NOW + 8 * H), LIVE_EXPIRED, 'after 8 hours the share cannot continue');
+});
+
+test('after 8 hours the employee can still record that the share stopped', () => {
+  const expired = rec('EMP', { live: live() });
+  assert.equal(locWriteProblem('update', P, { live: live({ on: false, stoppedAt: NOW + 8 * H }) }, expired, as('EMP'), NOW + 9 * H), null);
+});
+
+test('starting again after an expiry gives a new 8 hours', () => {
+  const expired = rec('EMP', { live: live() });
+  const later = NOW + 9 * H;
+  assert.equal(locWriteProblem('set', P, rec('EMP', { live: live({ run: 'r2', since: later, consentAt: later }) }), expired, as('EMP'), later), null);
+});
+
+test('a new share cannot be backdated to extend the old window', () => {
+  const later = NOW + 9 * H;
+  assert.equal(locWriteProblem('set', P, rec('EMP', { live: live({ run: 'r3', since: NOW, consentAt: later }) }), null, as('EMP'), later), 'Live sharing must start now.');
+  assert.equal(locWriteProblem('set', P, rec('EMP', { live: live({ run: 'r3', since: later + 11 * MIN }) }), null, as('EMP'), later), 'Live sharing must start now.', 'nor set in the future');
+});
+
+test('the start time of a running share cannot be changed', () => {
+  const running = rec('EMP', { live: live() });
+  assert.equal(locWriteProblem('update', P, { live: live({ since: NOW + 7 * H }) }, running, as('EMP'), NOW + 8.5 * H), 'Bad live-sharing record.');
 });
 
 console.log(`\n${n} tests passed`);

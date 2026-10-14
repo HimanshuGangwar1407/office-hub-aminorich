@@ -21,9 +21,15 @@ export function locVisible(path, s) {
 const num = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
 // A sharing run that was stopped (on any device) can't switch itself back on: only a new Start (a new run id) can.
 export const LIVE_STOPPED = 'Live sharing was stopped. Press Start to share again.';
+// Live sharing ends by itself this long after it starts, whether or not it was stopped. Starting again gives a new 8 hours.
+export const LIVE_MAX_MS = 8 * 3600000;
+export const LIVE_EXPIRED = 'Live sharing stopped after 8 hours. Press Start to share again.';
+// A new run must start now (allowing for the phone’s clock), so an old start time cannot be used to extend a share.
+const START_SLACK_MS = 10 * 60000;
+export const liveExpired = (live, now = Date.now()) => !!live?.on && num(live.since) && now >= live.since + LIVE_MAX_MS;
 
 /** Returns a user-facing reason the write is not allowed, or null when it is allowed. */
-export function locWriteProblem(op, path, data, old, s) {
+export function locWriteProblem(op, path, data, old, s, now = Date.now()) {
   const id = locEmpOf(path);
   if (!id) return 'Bad location record.';
   if (!s?.empId || id !== s.empId) return 'You can only share your own location.';
@@ -40,6 +46,15 @@ export function locWriteProblem(op, path, data, old, s) {
     if (l.run !== undefined && (typeof l.run !== 'string' || l.run.length > 40)) return 'Bad live-sharing record.';
     const was = old?.live;
     if (l.on && was && was.on === false && was.run && l.run === was.run) return LIVE_STOPPED;
+    if (l.on) {
+      const continuing = !!was?.on && !!was.run && l.run === was.run;
+      if (!continuing) {
+        if (!num(l.since) || Math.abs(now - l.since) > START_SLACK_MS) return 'Live sharing must start now.';
+      } else {
+        if (l.since !== was.since) return 'Bad live-sharing record.'; // the start time of a run never changes
+        if (liveExpired(was, now)) return LIVE_EXPIRED;
+      }
+    }
   }
   return null;
 }
