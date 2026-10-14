@@ -27,7 +27,7 @@ const ui = (k, d) => (S.ui[k] ?? d);
 /* ═════════════ Shell ═════════════ */
 const VIEWS = [
   ['dashboard', 'Dashboard', () => true], ['policies', 'Policies', () => true], ['chats', 'Chats', () => canView('chats')], ['attendance', 'Attendance', () => canView('attendance')], ['wfhlive', 'WFH locations', () => canSeeLocations()], ['leave', 'Leave', () => canView('leave')], ['tasks', 'Tasks', () => canView('tasks')],
-  ['worklog', 'Work log', () => canView('worklog')], ['approvals', 'Approvals', () => canView('approvals')], ['claims', 'Claims', () => canView('claims')], ['complaints', 'Complaints', () => true], ['departments', 'Departments', () => canView('departments')],
+  ['worklog', 'Work log', () => canView('worklog')], ['approvals', 'Approvals', () => canView('approvals')], ['claims', 'Claims', () => canView('claims')], ['complaints', 'Complaints', () => true], ['deptdash', 'Department dashboard', () => canDeptDash()], ['departments', 'Departments', () => canView('departments')],
   ['people', 'People', () => canView('people', isManager)], ['reports', 'Reports', () => canView('reports', isManager)], ['settings', 'Settings', () => canView('settings', isHR)],
 ];
 const ICON = {
@@ -41,6 +41,7 @@ const ICON = {
   approvals: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12l3 3 5-6',
   claims: 'M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6M9 16h3',
   complaints: 'M4 5h16v11H9l-5 4zM8 9h8M8 12h5',
+  deptdash: 'M3 21h18M5 21V9l7-5 7 5v12M9 21v-5h6v5M9 11h.01M12 11h.01M15 11h.01',
   policies: 'M7 3h8l4 4v14H7zM15 3v4h4M10 12h6M10 15h6M10 18h4',
   departments: 'M4 21V8l8-5 8 5v13M9 21v-6h6v6M8 10h.01M12 10h.01M16 10h.01',
   people: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21v-1a6 6 0 0 1 12 0v1M16 3.5a4 4 0 0 1 0 7M22 21v-1a6 6 0 0 0-4-5.6',
@@ -49,8 +50,8 @@ const ICON = {
   more: 'M5 12h.01M12 12h.01M19 12h.01',
 };
 const ico = (k) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICON[k] || ICON.more}"/></svg>`;
-const SEC = { dashboard: 'teal', policies: 'indigo', chats: 'sky', attendance: 'blue', wfhlive: 'sky', leave: 'violet', tasks: 'amber', worklog: 'leaf', approvals: 'coral', claims: 'gold', complaints: 'rose', departments: 'indigo', people: 'rose', reports: 'cyan', settings: 'slate' };
-const NAV_GROUPS = [['Workspace', ['dashboard', 'policies', 'chats', 'attendance', 'wfhlive', 'leave', 'tasks', 'worklog']], ['Requests', ['approvals', 'claims', 'complaints']], ['Organisation', ['departments', 'people', 'reports', 'settings']]];
+const SEC = { dashboard: 'teal', policies: 'indigo', chats: 'sky', attendance: 'blue', wfhlive: 'sky', leave: 'violet', tasks: 'amber', worklog: 'leaf', approvals: 'coral', claims: 'gold', complaints: 'rose', deptdash: 'teal', departments: 'indigo', people: 'rose', reports: 'cyan', settings: 'slate' };
+const NAV_GROUPS = [['Workspace', ['dashboard', 'policies', 'chats', 'attendance', 'wfhlive', 'leave', 'tasks', 'worklog']], ['Requests', ['approvals', 'claims', 'complaints']], ['Organisation', ['deptdash', 'departments', 'people', 'reports', 'settings']]];
 const MOBILE_NAV = ['dashboard', 'attendance', 'tasks', 'approvals'];
 function shell(content, title, sub, actions = '') {
   const inbox = myInbox().length, unread = S.ntf.filter((n) => !n.read).length, chatUnread = unreadCount();
