@@ -590,6 +590,9 @@ function teamOf(id) {
   const walk = (m) => S.emps.filter((e) => e.managerId === m && !out.has(e.id)).forEach((e) => { out.add(e.id); walk(e.id); });
   walk(id);
   cfg().depts.filter((d) => d.headId === id).forEach((d) => S.emps.filter((e) => e.deptId === d.id && e.id !== id).forEach((e) => out.add(e.id)));
+  // accounts with the Manager role manage their whole department (the server applies the same rule)
+  const me = S.emps.find((e) => e.id === id);
+  if (me?.role === 'MANAGER' && me.deptId && me.active !== false) S.emps.filter((e) => e.deptId === me.deptId && e.id !== id).forEach((e) => out.add(e.id));
   return [...out];
 }
 const myTeam = () => (S.me ? teamOf(S.me.id) : []);
@@ -4592,16 +4595,17 @@ async function polDelete(p) {
    check-ins (att), approved leave and WFH / official-duty requests (req), tasks, daily work logs (wlog) and shared
    WFH locations (loc — the server sends these only to Admin, HR and Manager accounts). Nothing is estimated or made
    up: where a record doesn't exist, the dashboard says so. */
-const ddDepts = () => (S.me ? cfg().depts.filter((d) => isMgmt() || d.headId === S.me.id) : []);
+// department heads and Manager-role accounts see their own department; Admin, HR and Directors every department
+const ddDepts = () => (S.me ? cfg().depts.filter((d) => isMgmt() || d.headId === S.me.id || (S.me.role === 'MANAGER' && S.me.active !== false && d.id === S.me.deptId)) : []);
 const canDeptDash = () => ddDepts().length > 0;
 // attendance category for the summary and the filter: one per person per day, so nobody is counted twice
 const DD_CAT = {
-  present: ['Present', 't-ok'], wfh: ['WFH / official duty', 't-info'], half: ['Half day', 't-warn'], leave: ['On leave', 't-vio'],
+  present: ['In office', 't-ok'], wfh: ['Work from home', 't-info'], od: ['Field visit / official duty', 't-vio'], half: ['Half day', 't-warn'], leave: ['On leave', 't-vio'],
   notin: ['Not checked in', 't-warn'], absent: ['Absent', 't-bad'], off: ['Weekly off / holiday', ''], pending: ['Machine data pending', ''], none: ['—', ''],
 };
 function ddCat(s, rem) {
   if (s.code === 'LV') return 'leave';
-  if (rem && !['WO', 'H'].includes(s.code)) return 'wfh';
+  if (rem && !['WO', 'H'].includes(s.code)) return rem.data.kind === 'OD' ? 'od' : 'wfh';
   return { P: 'present', L: 'present', I: 'present', HD: 'half', NI: 'notin', A: 'absent', WO: 'off', H: 'off', PS: 'pending' }[s.code] || 'none';
 }
 const DD_TASK_FILTERS = [['', 'Any task status'], ['IN_PROGRESS', 'Has work in progress'], ['BLOCKED', 'Has blocked work'], ['IN_REVIEW', 'Has work in review'], ['TODO', 'Has work to do'], ['OVERDUE', 'Has overdue work'], ['NONE', 'No open tasks']];
@@ -4659,7 +4663,7 @@ function vDeptDash() {
   const rows = ddRows(dept, d);
   const n = (c) => all.filter((r) => r.cat === c).length;
   const pending = all.reduce((s, r) => s + r.open.length, 0), late = all.reduce((s, r) => s + r.late.length, 0), done = all.reduce((s, r) => s + r.doneOn.length, 0);
-  const kpis = [['Present', n('present'), 'ok', 'present'], ['WFH / official duty', n('wfh'), '', 'wfh'], ['On leave', n('leave'), '', 'leave'], ['Half day', n('half'), n('half') ? 'warn' : '', 'half'],
+  const kpis = [['In office', n('present'), 'ok', 'present'], ['Work from home', n('wfh'), '', 'wfh'], ['Field visit / OD', n('od'), '', 'od'], ['On leave', n('leave'), '', 'leave'], ['Half day', n('half'), n('half') ? 'warn' : '', 'half'],
     [d === T ? 'Not checked in' : 'Absent', d === T ? n('notin') : n('absent'), (d === T ? n('notin') : n('absent')) ? 'warn' : '', d === T ? 'notin' : 'absent'],
     ...(d === T && n('absent') ? [['Absent', n('absent'), 'bad', 'absent']] : []),
     ['Pending tasks', pending, '', ''], ['Overdue', late, late ? 'bad' : '', ''], [`Completed ${d === T ? 'today' : 'that day'}`, done, 'ok', '']];
@@ -4677,7 +4681,10 @@ function vDeptDash() {
   };
   const taskCell = (r) => `<div class="small"><b>${r.open.length}</b> open${r.late.length ? ` · <span style="color:var(--bad);font-weight:600">${r.late.length} overdue</span>` : ''}${r.blocked.length ? ` · <span style="color:var(--bad)">${r.blocked.length} blocked</span>` : ''}</div>
     <div class="tiny muted">${r.doneOn.length ? `${r.doneOn.length} completed ${d === T ? 'today' : 'that day'} · ` : ''}${r.next ? `next due ${fmtD(r.next.due)}` : 'no deadlines'}</div>`;
-  const attCell = (r) => `${r.s.code ? stPill(r.s.code, r.s.note) : ''}${r.cat === 'wfh' && r.s.code !== 'WFH' && r.s.code !== 'OD' ? ` <span class="pill t-info">${r.rem.data.kind === 'OD' ? 'OD' : 'WFH'}</span>` : ''}${r.s.lateMin ? `<div class="tiny" style="color:var(--warn)">${r.s.lateMin} min late</div>` : ''}${ddLocCell(r)}`;
+  // where they are working: office, home, a field visit / official duty — or not working (leave, off, not in yet)
+  const whereCell = (r) => { const [l, cls] = DD_CAT[r.cat] || DD_CAT.none; const place = r.cat === 'od' && (r.rem.data.location || r.rem.data.place || r.rem.data.reason);
+    return `<span class="pill ${cls} dd-where">${esc(l)}</span>${place ? `<div class="tiny muted">${esc(String(place).slice(0, 80))}</div>` : ''}${ddLocCell(r)}`; };
+  const attCell = (r) => `${r.s.code ? stPill(r.s.code, r.s.note) : ''}${r.s.lateMin ? `<div class="tiny" style="color:var(--warn)">${r.s.lateMin} min late</div>` : ''}`;
   const body = `${ddTabs('today')}
     <div class="filters dd-filters">
       ${multi ? `<select class="i" id="dd-dept" data-c="ddDept" aria-label="Department">${opts(ddDepts().map((x) => [x.id, x.name]), dept.id)}</select>` : ''}
@@ -4688,14 +4695,14 @@ function vDeptDash() {
       ${ui('ddEmp', '') || ui('ddCat', '') || ui('ddTask', '') ? '<button class="btn ghost" data-a="dd-clear">Clear filters</button>' : ''}
     </div>
     <div class="kstrip dd-kpis">${kpis.map(([l, v, c, k]) => `<button class="kt" ${k ? `data-a="ui" data-k="ddCat" data-v="${k}" title="Show only: ${esc(l)}"` : 'style="cursor:default"'}><span class="l">${esc(l)}</span><span class="v ${c}">${v}</span></button>`).join('')}</div>
-    ${card(`${esc(dept.name)} · ${DAYS[dow(d)]} ${fmtD(d)} · ${all.length} people · head: ${esc(head)}`, rows.length ? `<div class="tbl-wrap"><table class="t dd-t"><thead><tr><th>Employee</th><th>Attendance</th><th>In</th><th>Out</th><th>Working on</th><th>Tasks</th><th>Work log</th></tr></thead><tbody>
+    ${card(`${esc(dept.name)} · ${DAYS[dow(d)]} ${fmtD(d)} · ${all.length} people · head: ${esc(head)}`, rows.length ? `<div class="tbl-wrap"><table class="t dd-t"><thead><tr><th>Employee</th><th>Working from</th><th>Attendance</th><th>In</th><th>Out</th><th>Working on</th><th>Tasks</th><th>Work log</th></tr></thead><tbody>
       ${rows.map((r) => `<tr class="click" data-a="dd-emp" data-e="${r.e.id}" data-d="${d}"><td>${person(r.e.id, r.e.designation || '')}</td>
-        <td>${attCell(r)}</td><td class="small">${r.s.inT ? hm(r.s.inT) : '—'}</td><td class="small">${r.s.outT ? hm(r.s.outT) : '—'}</td>
+        <td>${whereCell(r)}</td><td>${attCell(r)}</td><td class="small">${r.s.inT ? hm(r.s.inT) : '—'}</td><td class="small">${r.s.outT ? hm(r.s.outT) : '—'}</td>
         <td style="max-width:240px">${working(r)}</td><td>${taskCell(r)}</td>
         <td class="small">${r.wl ? `<span style="color:var(--ok)">Submitted ${hm(r.wl.at)}</span>${r.wl.blockers ? '<div class="tiny" style="color:var(--bad)">Has blockers</div>' : ''}` : '<span class="muted">Not submitted</span>'}</td></tr>`).join('')}
     </tbody></table></div>` : empty(all.length ? 'Nobody matches these filters.' : 'No active employees in this department.'), { list: true })}
     ${notes.length ? `<p class="tiny muted">${notes.join(' ')}</p>` : ''}
-    <p class="tiny muted">Attendance comes from check-ins, approved leave and approved WFH / official-duty requests. “Working on” is the person’s tasks marked In progress, or what they logged in their daily work log. Click a person for all their tasks and the day’s work log.</p>`;
+    <p class="tiny muted">“Working from”: In office = checked in without a WFH or official-duty request for the day; Work from home and Field visit / official duty come from approved requests. Attendance comes from check-ins, approved leave and approved WFH / official-duty requests. “Working on” is the person’s tasks marked In progress, or what they logged in their daily work log. Click a person for all their tasks and the day’s work log.</p>`;
   return shell(body, 'Department dashboard', multi ? 'Your departments — attendance and work, from the app’s own records' : `${esc(dept.name)} — attendance and work, from the app’s own records`);
 }
 
@@ -4826,7 +4833,7 @@ function ddWfhTab(dept) {
   };
   return `<div class="filters dd-filters">${ddDeptPick(dept)}<input type="date" class="i" id="dd-wfhdate" data-c="ddWfhDate" value="${d}" max="${T}" min="${addDays(T, -DD_LOC_DAYS)}" style="max-width:200px" aria-label="Date"></div>
     ${card(`Working remotely · ${fmtD(d)} · ${remote.length}`, remote.length ? `<div class="tbl-wrap"><table class="t"><thead><tr><th>Employee</th><th>Type</th><th>Attendance</th><th>In</th><th>Out</th><th>Location</th></tr></thead><tbody>
-      ${remote.map((x) => `<tr><td>${person(x.e.id, x.e.designation || '')}</td><td><span class="pill t-info">${x.rem.data.kind === 'OD' ? 'Official duty' : 'WFH'}</span></td><td>${x.s.code ? stPill(x.s.code, x.s.note) : ''}</td><td class="small">${x.s.inT ? hm(x.s.inT) : '—'}</td><td class="small">${x.s.outT ? hm(x.s.outT) : '—'}</td><td>${loc(x)}</td></tr>`).join('')}
+      ${remote.map((x) => `<tr><td>${person(x.e.id, x.e.designation || '')}</td><td><span class="pill ${x.rem.data.kind === 'OD' ? 't-vio' : 't-info'}">${x.rem.data.kind === 'OD' ? 'Field visit / official duty' : 'Work from home'}</span></td><td>${x.s.code ? stPill(x.s.code, x.s.note) : ''}</td><td class="small">${x.s.inT ? hm(x.s.inT) : '—'}</td><td class="small">${x.s.outT ? hm(x.s.outT) : '—'}</td><td>${loc(x)}</td></tr>`).join('')}
     </tbody></table></div>` : empty('Nobody in this department is working remotely that day.'), { list: true })}
     ${card(`Coming up · next 14 days · ${upcoming.length}`, upcoming.length ? `<ul class="list">${upcoming.map((r) => `<li data-a="req" data-id="${r.id}" style="cursor:pointer"><span class="grow small">${esc(nameOf(r.empId))} · ${r.data.kind === 'OD' ? 'Official duty' : 'WFH'} · ${fmtD(r.data.from)}${r.data.to && r.data.to !== r.data.from ? ' – ' + fmtD(r.data.to) : ''}</span>${pill(RSTAT, r.status)}</li>`).join('')}</ul>` : `<div class="body">${empty('No upcoming WFH or official duty.')}</div>`, { list: true })}
     ${canSeeLocations() ? '<p class="tiny"><button class="btn sm ghost" data-a="nav" data-v="wfhlive">Open the live WFH map</button></p>' : ''}`;

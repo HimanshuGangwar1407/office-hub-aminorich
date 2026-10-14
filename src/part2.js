@@ -67,6 +67,9 @@ function teamOf(id) {
   const walk = (m) => S.emps.filter((e) => e.managerId === m && !out.has(e.id)).forEach((e) => { out.add(e.id); walk(e.id); });
   walk(id);
   cfg().depts.filter((d) => d.headId === id).forEach((d) => S.emps.filter((e) => e.deptId === d.id && e.id !== id).forEach((e) => out.add(e.id)));
+  // accounts with the Manager role manage their whole department (the server applies the same rule)
+  const me = S.emps.find((e) => e.id === id);
+  if (me?.role === 'MANAGER' && me.deptId && me.active !== false) S.emps.filter((e) => e.deptId === me.deptId && e.id !== id).forEach((e) => out.add(e.id));
   return [...out];
 }
 const myTeam = () => (S.me ? teamOf(S.me.id) : []);
