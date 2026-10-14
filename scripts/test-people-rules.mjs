@@ -1,7 +1,7 @@
 // Tests who may read and write attendance, work logs, tasks, requests, private employee fields, payroll and the
 // audit log (server/people-rules.js). Run: node scripts/test-people-rules.mjs
 import assert from 'node:assert/strict';
-import { teamOf, peopleAccess, peopleReadable, shapeEmp, shapePayroll, shapeReq, peopleWriteProblem, auditEntry, PRIVATE_EMP_FIELDS } from '../server/people-rules.js';
+import { teamOf, peopleAccess, peopleReadable, shapeEmp, shapePayroll, shapeReq, peopleWriteProblem, auditEntry, PRIVATE_EMP_FIELDS, empManageProblem } from '../server/people-rules.js';
 
 // Sales: head HEAD; MGR reports to HEAD; E1, E2 report to MGR. Ops: O1 (no manager). Accounts (ACC): ACC1.
 const ctx = {
@@ -236,6 +236,38 @@ test('the server audits attendance edited by others, request decisions and role 
   const e = auditEntry('update', 'emp/E1', { role: 'MANAGER', phone: '1' }, { role: 'EMPLOYEE', phone: '0' }, HR.s, 7);
   assert.deepEqual(e, { at: 7, by: 'HRP', action: 'EMPLOYEE_CHANGED', detail: { emp: 'E1', changes: { role: ['EMPLOYEE', 'MANAGER'] } } }, 'only role / department / manager / status fields — no private values');
   assert.equal(auditEntry('update', 'emp/E1', { prefs: { email: false } }, { prefs: {} }, E1.s), null);
+});
+
+test('HR, directors and managers (own department) add and change employees; administrator access stays with administrators', () => {
+  const mp = (w, op, id, data, old) => empManageProblem(op, id, data, old, w.s, w.P, ctx);
+  const e1 = { name: 'E1', deptId: 'sales', role: 'EMPLOYEE', designation: 'Exec' }, adm = { name: 'A', deptId: 'ops', role: 'ADMIN' }, hrp = { name: 'H', deptId: 'sales', role: 'HR' };
+  for (const w of [HR, ADM, DIR, MGR]) {
+    assert.equal(mp(w, 'set', 'N1', { name: 'New', deptId: 'sales', role: 'EMPLOYEE' }, null), null, 'add ' + w.s.role);
+    assert.equal(mp(w, 'update', 'E1', { designation: 'Senior Exec' }, e1), null, 'edit ' + w.s.role);
+  }
+  assert.equal(mp(DIR, 'update', 'E1', { role: 'HR', deptId: 'ops' }, e1), null, 'directors move people and give HR / Director roles');
+  assert.equal(mp(DIR, 'update', 'HRP', { designation: 'Lead' }, hrp), null);
+  assert.equal(mp(MGR, 'update', 'E1', { role: 'MANAGER', managerId: 'MGR' }, e1), null, 'managers promote within their department');
+  assert.equal(mp(MGR, 'update', 'MGR', { designation: 'Sales lead' }, { deptId: 'sales', role: 'MANAGER' }), null, 'own record');
+  for (const w of [HR, DIR, MGR]) {
+    assert.match(mp(w, 'update', 'E1', { role: 'ADMIN' }, e1), /administrator/, 'grant admin ' + w.s.role);
+    assert.match(mp(w, 'update', 'ADM', { role: 'HR' }, adm), /administrator/, 'remove admin ' + w.s.role);
+  }
+  assert.equal(mp(ADM, 'update', 'E1', { role: 'ADMIN' }, e1), null);
+  assert.match(mp(DIR, 'update', 'ADM', { designation: 'x' }, adm), /administrator/);
+  assert.match(mp(HR, 'update', 'HRP', { role: 'DIRECTOR' }, { deptId: 'ops', role: 'HR' }), /own role/);
+  assert.match(mp(MGR, 'update', 'MGR', { role: 'DIRECTOR' }, { deptId: 'sales', role: 'MANAGER' }), /own role/);
+  assert.match(mp(DIR, 'delete', 'E1', undefined, e1), /Only HR/);
+  assert.match(mp(MGR, 'update', 'E1', { leaveAdj: { CL: 5 } }, e1), /leave/);
+  assert.match(mp(MGR, 'update', 'O1', { designation: 'x' }, { deptId: 'ops', role: 'EMPLOYEE' }), /own department/);
+  assert.match(mp(MGR, 'update', 'E1', { deptId: 'ops' }, e1), /own department/);
+  assert.match(mp(MGR, 'set', 'N2', { name: 'x', deptId: 'ops', role: 'EMPLOYEE' }, null), /own department/);
+  assert.match(mp(MGR, 'set', 'N3', { name: 'x', deptId: 'sales', role: 'HR' }, null), /Employee or Manager/);
+  assert.match(mp(MGR, 'update', 'E1', { role: 'DIRECTOR' }, e1), /Employee or Manager/);
+  assert.match(mp(MGR, 'update', 'HRP', { designation: 'x' }, hrp), /Only HR/);
+  assert.equal(mp(E1, 'update', 'E1', { designation: 'x' }, e1), undefined, 'employees fall through to the older own-record rules');
+  assert.equal(mp(HEAD, 'set', 'N4', { deptId: 'sales' }, null), undefined, 'heading a department is not a manager role');
+  assert.equal(mp(who('MGR', 'MANAGER', { active: false }), 'update', 'E1', { designation: 'x' }, e1), undefined, 'inactive');
 });
 
 console.log(`\n${n} tests passed`);

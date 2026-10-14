@@ -226,6 +226,33 @@ function reqProblem(op, next, old, s, P, X) {
   return 'You can’t change this request.';
 }
 
+// Who may add and change employee records besides HR / administrators: Directors (anyone but administrators) and
+// Managers (people in their own department, with the Employee or Manager role). Administrator access is only ever
+// given or removed by an administrator; nobody changes their own role; leave adjustments stay with HR.
+// Returns a reason, null when allowed, or undefined when the session isn't one of these roles (other rules apply).
+const ELEVATED = ['ADMIN', 'HR', 'DIRECTOR'];
+export function empManageProblem(op, id, data, old, s, P, ctx) {
+  const next = op === 'update' ? { ...(old || {}), ...(data || {}) } : op === 'set' ? data || {} : null;
+  const K = changedKeys(next, old);
+  // for everyone, HR included: administrator access is an administrator's decision; nobody changes their own role
+  if (K.includes('role') && (next?.role === 'ADMIN' || old?.role === 'ADMIN') && !s?.admin && !s?.bootstrap) return 'Only an administrator can give or remove administrator access.';
+  if (K.includes('role') && old && id === s?.empId && !s?.bootstrap) return 'You can’t change your own role.';
+  if (s?.hr || s?.bootstrap) return null;
+  if (!P.active || !['DIRECTOR', 'MANAGER'].includes(s?.role)) return undefined;
+  if (op === 'delete') return 'Only HR can remove employees — set their status to Exited instead.';
+  if (K.includes('leaveAdj')) return 'Only HR can adjust leave balances.';
+  if (old?.role === 'ADMIN') return 'Only an administrator can change an administrator’s record.';
+  if (s.role === 'MANAGER') {
+    const myDept = ctx.emps.get(s.empId)?.deptId || null;
+    if (!myDept) return 'Your account has no department, so you can’t manage employees. Ask HR.';
+    if (old && old.deptId !== myDept) return 'You can only change people in your own department.';
+    if (next.deptId !== myDept) return 'People you add or change must be in your own department.';
+    if (old && ELEVATED.includes(old.role) && id !== s.empId) return 'Only HR can change HR, director or administrator records.';
+    if (ELEVATED.includes(next.role) && K.includes('role')) return 'Managers can only give the Employee or Manager role.';
+  }
+  return null;
+}
+
 // fields of an employee record whose changes are always audited (who someone reports to, what they may do)
 const AUDITED_EMP_FIELDS = ['role', 'deptId', 'managerId', 'status', 'active', 'designation', 'code', 'email', 'joining', 'exitDate'];
 

@@ -341,16 +341,21 @@ async function onSubmit(f, form, fd, submitter) {
       });
     }
     case 'emp': return act(async () => {
-      if (!isHR()) fail('Only HR or an administrator can edit employees.');
-      const body = {}; for (const k of ['name', 'code', 'email', 'phone', 'designation', 'deptId', 'managerId', 'role', 'bioId', 'status', 'joining', 'probEnd', 'dob', 'exitDate', 'clearance', 'assets', 'userId']) body[k] = v(k);
+      if (!canEditEmp(id ? empById(id) : null)) fail('You can’t add or change this person. HR, directors, and managers (for their own department) can.');
+      const body = {}; for (const k of ['name', 'code', 'email', 'phone', 'designation', 'deptId', 'managerId', 'role', 'bioId', 'status', 'joining', 'probEnd', 'dob', 'exitDate', 'clearance', 'assets', 'userId']) if (fd.has(k)) body[k] = v(k); // fields not on this person's form (e.g. the login link, HR only) stay as they are
       body.email = body.email.toLowerCase(); body.code = body.code.toUpperCase();
       if (!body.name || !body.code) fail('Name and employee code are required.');
       if (S.emps.some((e) => e.id !== id && e.code === body.code)) fail(`Employee code ${body.code} is already used.`);
       if (body.bioId && S.emps.some((e) => e.id !== id && e.bioId === body.bioId)) fail(`Biometric ID ${body.bioId} is already on another employee.`);
       if (body.managerId && body.managerId === id) fail('Someone can’t report to themselves.');
-      if (body.role === 'ADMIN' && S.me.role !== 'ADMIN') fail('Only an administrator can make someone an administrator.');
+      if (body.role === 'ADMIN' && S.me.role !== 'ADMIN' && empById(id)?.role !== 'ADMIN') fail('Only an administrator can make someone an administrator.');
+      if (id && id === S.me.id && body.role !== S.me.role) fail('You can’t change your own role.');
+      if (!isHR() && S.me.role === 'MANAGER') {
+        if (body.deptId !== S.me.deptId) fail('People you add or change must be in your own department.');
+        if (['HR', 'DIRECTOR', 'ADMIN'].includes(body.role) && body.role !== empById(id)?.role) fail('Managers can only give the Employee or Manager role.');
+      }
       body.active = body.status !== 'EXITED';
-      body.userId = body.userId || null;
+      if ('userId' in body) body.userId = body.userId || null;
       if (id) {
         const e = empById(id), h = [...(e.history || [])], T = today();
         if (e.deptId !== body.deptId) h.push({ kind: 'Transfer', date: T, from: deptOf(e.deptId)?.name || '', to: deptOf(body.deptId)?.name || '' });

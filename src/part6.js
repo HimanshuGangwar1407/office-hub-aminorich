@@ -207,7 +207,7 @@ function empForm(id) {
   // private details (and leave balances) are only sent to the person, their managers, management and payroll
   const priv = !e || hr || canSee(e.id);
   const T = today(), bals = e && priv ? balances(e) : [];
-  const ro = !hr ? 'disabled' : '';
+  const ro = canEditEmp(e) ? '' : 'disabled', mgrOnly = !hr && S.me.role === 'MANAGER';
   return `${mhead(e ? esc(e.name) : 'Add employee', e ? `${esc(e.code)} · ${esc(e.designation || '')}` : 'Link their Claude login below so they’re recognised when they open OfficeHub')}
   <form data-f="emp" data-id="${e?.id || ''}"><div class="body fgrid">
     <label class="f">Full name<input class="i" id="ef-n" name="name" required value="${esc(e?.name || '')}" ${ro}></label>
@@ -215,9 +215,9 @@ function empForm(id) {
     <label class="f">Work email<input class="i" id="ef-e" type="email" name="email" value="${esc(e?.email || '')}" ${ro}></label>
     ${priv ? `<label class="f">Phone<input class="i" id="ef-p" name="phone" value="${esc(e?.phone || '')}" ${ro}></label>` : ''}
     <label class="f">Designation<input class="i" id="ef-d" name="designation" value="${esc(e?.designation || '')}" ${ro}></label>
-    <label class="f">Department<select class="i" id="ef-dp" name="deptId" ${ro}>${deptOpts(e?.deptId, '—')}</select></label>
+    <label class="f">Department<select class="i" id="ef-dp" name="deptId" ${ro}>${mgrOnly ? opts(cfg().depts.filter((d) => d.id === S.me.deptId).map((d) => [d.id, d.name]), S.me.deptId) : deptOpts(e?.deptId, '—')}</select></label>
     <label class="f">Reports to<select class="i" id="ef-m" name="managerId" ${ro}>${peopleOpts(e?.managerId, '—', active().filter((x) => x.id !== e?.id).map((x) => x.id))}</select></label>
-    <label class="f">Role in this app<select class="i" id="ef-r" name="role" ${ro}>${opts([['EMPLOYEE', 'Employee'], ['MANAGER', 'Manager'], ['HR', 'HR'], ['DIRECTOR', 'Director'], ['ADMIN', 'Administrator']], e?.role || 'EMPLOYEE')}</select></label>
+    <label class="f">Role in this app<select class="i" id="ef-r" name="role" ${ro}>${opts([['EMPLOYEE', 'Employee'], ['MANAGER', 'Manager'], ...(mgrOnly && !['HR', 'DIRECTOR'].includes(e?.role) ? [] : [['HR', 'HR'], ['DIRECTOR', 'Director']]), ...(S.me.role === 'ADMIN' || e?.role === 'ADMIN' ? [['ADMIN', 'Administrator']] : [])], e?.role || 'EMPLOYEE')}</select></label>
     ${priv ? `<label class="f">Biometric ID (on the machine)<input class="i" id="ef-b" name="bioId" value="${esc(e?.bioId || '')}" ${ro}></label>` : ''}
     <label class="f">Status<select class="i" id="ef-s" name="status" ${ro}>${opts([['ACTIVE', 'Active'], ['PROBATION', 'Probation'], ['ON_NOTICE', 'On notice'], ['EXITED', 'Exited']], e?.status || 'ACTIVE')}</select></label>
     <label class="f">Joining date<input class="i" id="ef-j" type="date" name="joining" value="${e?.joining || ''}" ${ro}></label>
@@ -234,7 +234,7 @@ function empForm(id) {
   ${e && priv ? `<div class="body" style="border-top:1px solid var(--line)"><h3>Leave balances ${T.slice(0, 4)}</h3><div class="row small" style="margin-top:6px">${bals.map((b) => `<span>${esc(b.lt.code)} <b>${b.lt.quota ? b.avail : '—'}</b> left (${b.used} used)</span>`).join(' · ')}</div>
     ${hr ? `<div class="row" style="margin-top:8px"><select class="i" id="ef-adj-lt" style="width:auto">${opts(cfg().leaveTypes.map((l) => [l.code, l.code]))}</select><input class="i" id="ef-adj-v" type="number" step="0.5" placeholder="+/- days" style="width:110px"><input class="i" id="ef-adj-r" placeholder="Reason (kept in audit log)" style="flex:1;min-width:140px"><button type="button" class="btn" data-a="leave-adj" data-id="${e.id}">Adjust</button></div>` : ''}
     ${(e.history || []).length ? `<h3 style="margin-top:12px">History</h3>${e.history.slice().reverse().map((h) => `<div class="tiny" style="margin-top:4px"><b>${esc(h.kind)}</b> ${fmtD(h.date)} — ${esc(h.from || '—')} → ${esc(h.to || '—')}</div>`).join('')}` : ''}</div>` : ''}
-  <footer>${e ? `<button type="button" class="btn" data-a="new-task" data-assignee="${e.id}">Assign a task</button>${e.id !== S.me.id ? `<button type="button" class="btn" data-a="dm" data-id="${e.id}">Message</button>` : ''}${hr && e.userId && e.id !== S.me.id ? `<button type="button" class="btn danger" data-a="acct-reset" data-id="${e.id}">Reset password</button>` : ''}` : ''}<span style="flex:1"></span><button type="button" class="btn" data-a="close">Close</button>${hr ? `<button class="btn pri" type="submit">${e ? 'Save' : 'Add employee'}</button>` : ''}</footer></form>`;
+  <footer>${e ? `<button type="button" class="btn" data-a="new-task" data-assignee="${e.id}">Assign a task</button>${e.id !== S.me.id ? `<button type="button" class="btn" data-a="dm" data-id="${e.id}">Message</button>` : ''}${hr && e.userId && e.id !== S.me.id ? `<button type="button" class="btn danger" data-a="acct-reset" data-id="${e.id}">Reset password</button>` : ''}` : ''}<span style="flex:1"></span><button type="button" class="btn" data-a="close">Close</button>${canEditEmp(e) ? `<button class="btn pri" type="submit">${e ? 'Save' : 'Add employee'}</button>` : ''}</footer></form>`;
 }
 
 /* Templates & notifications */

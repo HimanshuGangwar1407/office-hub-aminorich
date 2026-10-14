@@ -4,7 +4,7 @@ import { sessionFrom, hashPassword, checkPassword, passwordProblem, newUid, make
 import { chatWriteProblem, clearedChatsProblem } from './chat-rules.js';
 import { locWriteProblem, LIVE_STOPPED, LIVE_EXPIRED } from './loc-rules.js';
 import { buildCtx, accessFor, canReadDoc, shapeDoc, empWriteProblem, chatAccessProblem, ntfWriteProblem, mailWriteProblem, blobReadable, blobWriteProblem, refUsesFile } from './access.js';
-import { peopleWriteProblem, auditEntry } from './people-rules.js';
+import { peopleWriteProblem, auditEntry, empManageProblem } from './people-rules.js';
 import { isAssignableCtx, complaintWriteProblem, buildComplaint } from './complaints.js';
 import { policyWriteProblem, policyFileWriteProblem, policyVisible, isPolicyManager } from './policy.js';
 
@@ -97,9 +97,12 @@ async function checkWrite(op, path, data, old, s, A) {
     const next = op === 'update' ? { ...(old || {}), ...data } : op === 'set' ? data : null;
     // userId links an employee to a login. Only the server sets it — except the owner's own record during first-time setup.
     if (next && (next.userId || '') !== (old?.userId || '') && !(s.bootstrap && !old && next.userId === s.uid)) no('Logins are linked when the employee creates their account.');
-    if (s.hr || s.bootstrap) return;
-    if (!old || op === 'delete') no('Only HR can add or remove employees.');
-    for (const k of PROTECTED_EMP) if (JSON.stringify(next[k] ?? null) !== JSON.stringify(old[k] ?? null)) no('Only HR can change role, code, email, status, manager or department.');
+    // HR, administrators, Directors and Managers (their own department) add and change employees — server/people-rules.js
+    const m = empManageProblem(op, a, data, old, s, A.P, A.ctx);
+    if (m) no(m);
+    if (m === null) return;
+    if (!old || op === 'delete') no('Only HR, directors and managers can add or remove employees.');
+    for (const k of PROTECTED_EMP) if (JSON.stringify(next[k] ?? null) !== JSON.stringify(old[k] ?? null)) no('Only HR, directors and managers can change role, code, email, status, manager or department.');
     const bad = empWriteProblem(op, path, data, old, A); if (bad) no(bad);
   }
 }
