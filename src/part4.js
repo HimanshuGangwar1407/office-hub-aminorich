@@ -10,7 +10,7 @@ const peopleOpts = (sel, blank, ids) => opts((ids ? ids.map(empById).filter(Bool
 function peopleGroups(sel, { blank = null, exclude = [], load = false } = {}) {
   const ex = new Set(exclude), all = active().filter((e) => !ex.has(e.id)).sort((a, b) => a.name.localeCompare(b.name));
   const openOf = (id) => S.tasks.filter((t) => t.assigneeId === id && openTask(t)).length;
-  const o = (e) => `<option value="${e.id}" ${e.id === sel ? 'selected' : ''}>${esc(e.name)}${e.id === S.me?.id ? ' (me)' : ''}${e.designation ? ' — ' + esc(e.designation) : ''}${load ? ` · ${openOf(e.id)} open` : ''}</option>`;
+  const o = (e) => `<option value="${e.id}" ${e.id === sel ? 'selected' : ''}>${esc(e.name)}${e.id === S.me?.id ? ' (me)' : ''}${e.designation ? ' — ' + esc(e.designation) : ''}${load && canSee(e.id) ? ` · ${openOf(e.id)} open` : ''}</option>`;
   const team = new Set(S.me ? myTeam() : []), mgr = S.me?.managerId, myDept = S.me?.deptId;
   const used = new Set(); const grp = (label, list) => { const l = list.filter((e) => !used.has(e.id)); l.forEach((e) => used.add(e.id)); return l.length ? `<optgroup label="${esc(label)}">${l.map(o).join('')}</optgroup>` : ''; };
   let h = blank != null ? `<option value="">${esc(blank)}</option>` : '';
@@ -27,7 +27,7 @@ const ui = (k, d) => (S.ui[k] ?? d);
 /* ═════════════ Shell ═════════════ */
 const VIEWS = [
   ['dashboard', 'Dashboard', () => true], ['policies', 'Policies', () => true], ['chats', 'Chats', () => canView('chats')], ['attendance', 'Attendance', () => canView('attendance')], ['wfhlive', 'WFH locations', () => canSeeLocations()], ['leave', 'Leave', () => canView('leave')], ['tasks', 'Tasks', () => canView('tasks')],
-  ['worklog', 'Work log', () => canView('worklog')], ['approvals', 'Approvals', () => canView('approvals')], ['claims', 'Claims', () => canView('claims')], ['complaints', 'Complaints', () => true], ['deptdash', 'Department dashboard', () => canDeptDash()], ['departments', 'Departments', () => canView('departments')],
+  ['worklog', 'Work log', () => canView('worklog')], ['approvals', 'Approvals', () => canView('approvals')], ['claims', 'Claims', () => canView('claims')], ['complaints', 'Complaints', () => true], ['deptdash', 'Department dashboard', () => canDeptDash()], ['hrdash', 'HR dashboard', () => isHR()], ['mgmtdash', 'Management', () => canMgmtDash()], ['departments', 'Departments', () => canView('departments')],
   ['people', 'People', () => canView('people', isManager)], ['reports', 'Reports', () => canView('reports', isManager)], ['settings', 'Settings', () => canView('settings', isHR)],
 ];
 const ICON = {
@@ -41,6 +41,8 @@ const ICON = {
   approvals: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12l3 3 5-6',
   claims: 'M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6M9 16h3',
   complaints: 'M4 5h16v11H9l-5 4zM8 9h8M8 12h5',
+  hrdash: 'M16 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM2 20v-1a5 5 0 0 1 10 0v1M12 20v-1a5 5 0 0 1 10 0v1',
+  mgmtdash: 'M4 20V10M10 20V4M16 20v-7M22 20H2',
   deptdash: 'M3 21h18M5 21V9l7-5 7 5v12M9 21v-5h6v5M9 11h.01M12 11h.01M15 11h.01',
   policies: 'M7 3h8l4 4v14H7zM15 3v4h4M10 12h6M10 15h6M10 18h4',
   departments: 'M4 21V8l8-5 8 5v13M9 21v-6h6v6M8 10h.01M12 10h.01M16 10h.01',
@@ -50,8 +52,8 @@ const ICON = {
   more: 'M5 12h.01M12 12h.01M19 12h.01',
 };
 const ico = (k) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICON[k] || ICON.more}"/></svg>`;
-const SEC = { dashboard: 'teal', policies: 'indigo', chats: 'sky', attendance: 'blue', wfhlive: 'sky', leave: 'violet', tasks: 'amber', worklog: 'leaf', approvals: 'coral', claims: 'gold', complaints: 'rose', deptdash: 'teal', departments: 'indigo', people: 'rose', reports: 'cyan', settings: 'slate' };
-const NAV_GROUPS = [['Workspace', ['dashboard', 'policies', 'chats', 'attendance', 'wfhlive', 'leave', 'tasks', 'worklog']], ['Requests', ['approvals', 'claims', 'complaints']], ['Organisation', ['deptdash', 'departments', 'people', 'reports', 'settings']]];
+const SEC = { dashboard: 'teal', policies: 'indigo', chats: 'sky', attendance: 'blue', wfhlive: 'sky', leave: 'violet', tasks: 'amber', worklog: 'leaf', approvals: 'coral', claims: 'gold', complaints: 'rose', deptdash: 'teal', hrdash: 'rose', mgmtdash: 'indigo', departments: 'indigo', people: 'rose', reports: 'cyan', settings: 'slate' };
+const NAV_GROUPS = [['Workspace', ['dashboard', 'policies', 'chats', 'attendance', 'wfhlive', 'leave', 'tasks', 'worklog']], ['Requests', ['approvals', 'claims', 'complaints']], ['Organisation', ['mgmtdash', 'hrdash', 'deptdash', 'departments', 'people', 'reports', 'settings']]];
 const MOBILE_NAV = ['dashboard', 'attendance', 'tasks', 'approvals'];
 function shell(content, title, sub, actions = '') {
   const inbox = myInbox().length, unread = S.ntf.filter((n) => !n.read).length, chatUnread = unreadCount();
@@ -185,7 +187,7 @@ function vDashboard() {
   </div>` : '';
 
   const actions = `<button class="btn pri" data-a="new-task">+ Task</button><button class="btn" data-a="apply-leave">Apply leave</button><button class="btn" data-a="claim-new">Claim expense</button><button class="btn hide-sm" data-a="new-req">Raise request</button>`;
-  const body = `${yourDay}${myLists}${overview}${company}`;
+  const body = `${yourDay}${myWorkspace()}${myLists}${overview}${company}`;
   return shell(body, `Good ${h < 12 ? 'morning' : h < 17 ? 'afternoon' : 'evening'}, ${esc(me.name.split(' ')[0])}`, `${DAYS[dow(T)]}, ${fmtD(T)}`, actions);
 }
 
@@ -250,7 +252,8 @@ function vLeave() {
   const T = today(), year = +T.slice(0, 4), bals = balances(S.me, year);
   const mine = reqsOf('LEAVE', S.me.id).sort((a, b) => b.data.from.localeCompare(a.data.from));
   const m = ui('lvMonth', T.slice(0, 7)), days = eachDay(m + '-01', monthEnd(m));
-  const ppl = (isMgmt() ? active() : [S.me, ...myTeam().map(empById), empById(S.me.managerId)].filter(Boolean)).sort((a, b) => a.name.localeCompare(b.name));
+  // only people whose leave this user may see (the server sends nobody else's)
+  const ppl = (isMgmt() ? active() : [S.me, ...myTeam().map(empById)].filter(Boolean)).sort((a, b) => a.name.localeCompare(b.name));
   const body = `<div class="grid g3" style="margin-bottom:14px">${bals.map((b) => card(esc(b.lt.name), `<div style="font:600 2rem var(--f-display)">${b.lt.quota ? b.avail : '—'} <span class="small muted" style="font-family:var(--f-body)">${b.lt.quota ? 'days available' : 'unpaid, no balance'}</span></div>
     <div class="kv" style="margin-top:6px"><div><span>Credited</span><b>${b.entitled}</b></div><div><span>Used</span><b>${b.used}</b></div><div><span>Pending</span><b>${b.pending}</b></div><div><span>Code</span><b>${esc(b.lt.code)}</b></div></div>
     ${b.lt.accrual ? `<p class="tiny muted" style="margin:6px 0 0">Earns ${round2(b.lt.quota / 12)} per month</p>` : ''}`)).join('')}</div>

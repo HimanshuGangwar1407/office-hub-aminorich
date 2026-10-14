@@ -681,6 +681,14 @@ const effStatus = (t) => (t.status === 'TODO' && t.start > today() ? 'UPCOMING' 
 const overdue = (t, on = today()) => openTask(t) && t.due < on;
 const taskSort = (a, b) => (overdue(b) - overdue(a)) || (PRANK[a.priority] - PRANK[b.priority]) || a.due.localeCompare(b.due);
 const canManageTask = (t) => t.assignerId === S.me.id || isMgmt() || (t.assigneeId !== S.me.id && myTeam().includes(t.assigneeId));
+// Request and task numbers come from the server, which sees every record; a browser only sees its own and its team's.
+// (Off the server — the original artifact host — they are counted locally as before.)
+async function serverCode(prefix, list) {
+  if (!window.OH?.api) return nextCode(prefix, list);
+  const r = await window.OH.api('seq', { name: prefix });
+  if (!r?.code) fail('Couldn’t get a new number from the server. Try again.');
+  return r.code;
+}
 function nextCode(prefix, list) { const n = list.map((x) => +String(x.code || '').split('-')[1] || 0); return `${prefix}-${String((n.length ? Math.max(...n) : 0) + 1).padStart(4, '0')}`; }
 
 /* ═════════════ Approvals ═════════════ */
@@ -783,9 +791,9 @@ async function identify() {
 async function createRequest(type, title, data, { amount = null, ctx = {}, empId } = {}) {
   const emp = empById(empId || S.me.id);
   const chain = chainFor(type, emp, { ...ctx, amount });
-  const now = Date.now();
+  const now = Date.now(), code = await serverCode('REQ', S.reqs);
   const r = {
-    code: nextCode('REQ', S.reqs), type, empId: emp.id, raisedBy: S.me.id, title, data, amount, status: 'PENDING', created: now,
+    code, type, empId: emp.id, raisedBy: S.me.id, title, data, amount, status: 'PENDING', created: now,
     steps: chain.map((s, i) => ({ ...s, status: i ? 'WAITING' : 'PENDING', at: i ? null : now })),
   };
   const id = newId();
@@ -873,7 +881,7 @@ async function escalate(r) {
   const s = curStep(r);
   if (!s) return;
   const boss = empById(s.by)?.managerId || firstRole('DIRECTOR', s.by);
-  await put(`req/${r.id}`, { ...strip(r), steps: r.steps.map((x) => (x === s ? { ...x, escalated: Date.now() } : x)) });
+  await put(`req/${r.id}`, { ...strip(r), steps: r.steps.map((x) => (x === s ? { ...x, escalated: Date.now() } : x)), watchers: [...new Set([...(r.watchers || []), boss].filter(Boolean))] });
   await notify([s.by], { title: `Reminder: ${r.code} is waiting for you`, body: r.title, go: { view: 'approvals', req: r.id } });
   if (boss) await notify([boss], { title: `Escalated: ${r.code} pending with ${nameOf(s.by)}`, body: `${r.title} — past the ${cfg().slaHours} h response time`, go: { view: 'approvals', req: r.id } });
 }
@@ -928,6 +936,9 @@ async function mentionNotify(text, title, go) {
   if (!handles.length) return;
   const ids = active().filter((e) => handles.some((h) => e.name.toLowerCase().split(/\s+/)[0] === h || (e.code || '').toLowerCase() === h)).map((e) => e.id);
   const deptHeads = cfg().depts.filter((d) => handles.includes(d.code.toLowerCase())).map((d) => d.headId);
+  const who = [...new Set([...ids, ...deptHeads].filter((x) => x && x !== S.me?.id))];
+  const rec = go?.task ? ['task', S.tasks.find((t) => t.id === go.task)] : go?.req ? ['req', S.reqs.find((r) => r.id === go.req)] : null;
+  if (rec?.[1] && who.some((x) => !(rec[1].watchers || []).includes(x))) await patch(`${rec[0]}/${rec[1].id}`, { watchers: [...new Set([...(rec[1].watchers || []), ...who])] }).catch(() => {});
   await notify([...ids, ...deptHeads], { title: `You were mentioned: ${title}`, body: text.slice(0, 200), go });
 }
 
@@ -937,7 +948,8 @@ async function runRecurring() {
   if (recurringRan || S.readonly) return;
   recurringRan = true;
   const T = today(), dom = +T.slice(8), codes = S.tasks.slice();
-  for (const tp of S.tpls.filter((x) => x.active !== false && (x.lastGen || '') < T)) {
+  const mayRun = (tp) => tp.assigneeId === S.me?.id || tp.createdBy === S.me?.id || isMgmt() || myTeam().includes(tp.assigneeId);
+  for (const tp of S.tpls.filter((x) => x.active !== false && (x.lastGen || '') < T && mayRun(x))) {
     const due = tp.freq === 'DAILY' ? workingDay(T) : tp.freq === 'WEEKLY' ? dow(T) === +tp.dow : dom === +tp.dom;
     if (!due) continue;
     try {
@@ -946,15 +958,15 @@ async function runRecurring() {
       if (!lease.acquired) continue;
       const fresh = await ref.get();
       if (!fresh.exists || (fresh.data().lastGen || '') >= T) continue;
-      const id = newId();
+      const id = newId(), code = await serverCode('TSK', codes);
       await put(`task/${id}`, {
-        code: nextCode('TSK', codes), title: tp.title, desc: tp.desc || '', assigneeId: tp.assigneeId, assignerId: tp.createdBy, reviewerId: tp.needsReview ? tp.createdBy : null,
+        code, title: tp.title, desc: tp.desc || '', assigneeId: tp.assigneeId, assignerId: tp.createdBy, reviewerId: tp.needsReview ? tp.createdBy : null,
         needsReview: !!tp.needsReview, deptId: empById(tp.assigneeId)?.deptId || null, project: tp.project || 'Recurring', priority: tp.priority || 'MEDIUM', status: 'TODO',
         start: T, due: addDays(T, +tp.dueIn || 0), checklist: (tp.checklist || []).map((x) => ({ t: x, d: false })), comments: [], created: Date.now(), tplId: tp.id,
         history: [{ at: Date.now(), by: null, a: 'Created from recurring template' }],
       });
       await patch(`tpl/${tp.id}`, { lastGen: T });
-      codes.push({ code: nextCode('TSK', codes) });
+      codes.push({ code });
     } catch (e) { console.warn('recurring', e); }
   }
 }
@@ -1062,7 +1074,7 @@ const peopleOpts = (sel, blank, ids) => opts((ids ? ids.map(empById).filter(Bool
 function peopleGroups(sel, { blank = null, exclude = [], load = false } = {}) {
   const ex = new Set(exclude), all = active().filter((e) => !ex.has(e.id)).sort((a, b) => a.name.localeCompare(b.name));
   const openOf = (id) => S.tasks.filter((t) => t.assigneeId === id && openTask(t)).length;
-  const o = (e) => `<option value="${e.id}" ${e.id === sel ? 'selected' : ''}>${esc(e.name)}${e.id === S.me?.id ? ' (me)' : ''}${e.designation ? ' — ' + esc(e.designation) : ''}${load ? ` · ${openOf(e.id)} open` : ''}</option>`;
+  const o = (e) => `<option value="${e.id}" ${e.id === sel ? 'selected' : ''}>${esc(e.name)}${e.id === S.me?.id ? ' (me)' : ''}${e.designation ? ' — ' + esc(e.designation) : ''}${load && canSee(e.id) ? ` · ${openOf(e.id)} open` : ''}</option>`;
   const team = new Set(S.me ? myTeam() : []), mgr = S.me?.managerId, myDept = S.me?.deptId;
   const used = new Set(); const grp = (label, list) => { const l = list.filter((e) => !used.has(e.id)); l.forEach((e) => used.add(e.id)); return l.length ? `<optgroup label="${esc(label)}">${l.map(o).join('')}</optgroup>` : ''; };
   let h = blank != null ? `<option value="">${esc(blank)}</option>` : '';
@@ -1079,7 +1091,7 @@ const ui = (k, d) => (S.ui[k] ?? d);
 /* ═════════════ Shell ═════════════ */
 const VIEWS = [
   ['dashboard', 'Dashboard', () => true], ['policies', 'Policies', () => true], ['chats', 'Chats', () => canView('chats')], ['attendance', 'Attendance', () => canView('attendance')], ['wfhlive', 'WFH locations', () => canSeeLocations()], ['leave', 'Leave', () => canView('leave')], ['tasks', 'Tasks', () => canView('tasks')],
-  ['worklog', 'Work log', () => canView('worklog')], ['approvals', 'Approvals', () => canView('approvals')], ['claims', 'Claims', () => canView('claims')], ['complaints', 'Complaints', () => true], ['deptdash', 'Department dashboard', () => canDeptDash()], ['departments', 'Departments', () => canView('departments')],
+  ['worklog', 'Work log', () => canView('worklog')], ['approvals', 'Approvals', () => canView('approvals')], ['claims', 'Claims', () => canView('claims')], ['complaints', 'Complaints', () => true], ['deptdash', 'Department dashboard', () => canDeptDash()], ['hrdash', 'HR dashboard', () => isHR()], ['mgmtdash', 'Management', () => canMgmtDash()], ['departments', 'Departments', () => canView('departments')],
   ['people', 'People', () => canView('people', isManager)], ['reports', 'Reports', () => canView('reports', isManager)], ['settings', 'Settings', () => canView('settings', isHR)],
 ];
 const ICON = {
@@ -1093,6 +1105,8 @@ const ICON = {
   approvals: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12l3 3 5-6',
   claims: 'M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6M9 16h3',
   complaints: 'M4 5h16v11H9l-5 4zM8 9h8M8 12h5',
+  hrdash: 'M16 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM2 20v-1a5 5 0 0 1 10 0v1M12 20v-1a5 5 0 0 1 10 0v1',
+  mgmtdash: 'M4 20V10M10 20V4M16 20v-7M22 20H2',
   deptdash: 'M3 21h18M5 21V9l7-5 7 5v12M9 21v-5h6v5M9 11h.01M12 11h.01M15 11h.01',
   policies: 'M7 3h8l4 4v14H7zM15 3v4h4M10 12h6M10 15h6M10 18h4',
   departments: 'M4 21V8l8-5 8 5v13M9 21v-6h6v6M8 10h.01M12 10h.01M16 10h.01',
@@ -1102,8 +1116,8 @@ const ICON = {
   more: 'M5 12h.01M12 12h.01M19 12h.01',
 };
 const ico = (k) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICON[k] || ICON.more}"/></svg>`;
-const SEC = { dashboard: 'teal', policies: 'indigo', chats: 'sky', attendance: 'blue', wfhlive: 'sky', leave: 'violet', tasks: 'amber', worklog: 'leaf', approvals: 'coral', claims: 'gold', complaints: 'rose', deptdash: 'teal', departments: 'indigo', people: 'rose', reports: 'cyan', settings: 'slate' };
-const NAV_GROUPS = [['Workspace', ['dashboard', 'policies', 'chats', 'attendance', 'wfhlive', 'leave', 'tasks', 'worklog']], ['Requests', ['approvals', 'claims', 'complaints']], ['Organisation', ['deptdash', 'departments', 'people', 'reports', 'settings']]];
+const SEC = { dashboard: 'teal', policies: 'indigo', chats: 'sky', attendance: 'blue', wfhlive: 'sky', leave: 'violet', tasks: 'amber', worklog: 'leaf', approvals: 'coral', claims: 'gold', complaints: 'rose', deptdash: 'teal', hrdash: 'rose', mgmtdash: 'indigo', departments: 'indigo', people: 'rose', reports: 'cyan', settings: 'slate' };
+const NAV_GROUPS = [['Workspace', ['dashboard', 'policies', 'chats', 'attendance', 'wfhlive', 'leave', 'tasks', 'worklog']], ['Requests', ['approvals', 'claims', 'complaints']], ['Organisation', ['mgmtdash', 'hrdash', 'deptdash', 'departments', 'people', 'reports', 'settings']]];
 const MOBILE_NAV = ['dashboard', 'attendance', 'tasks', 'approvals'];
 function shell(content, title, sub, actions = '') {
   const inbox = myInbox().length, unread = S.ntf.filter((n) => !n.read).length, chatUnread = unreadCount();
@@ -1237,7 +1251,7 @@ function vDashboard() {
   </div>` : '';
 
   const actions = `<button class="btn pri" data-a="new-task">+ Task</button><button class="btn" data-a="apply-leave">Apply leave</button><button class="btn" data-a="claim-new">Claim expense</button><button class="btn hide-sm" data-a="new-req">Raise request</button>`;
-  const body = `${yourDay}${myLists}${overview}${company}`;
+  const body = `${yourDay}${myWorkspace()}${myLists}${overview}${company}`;
   return shell(body, `Good ${h < 12 ? 'morning' : h < 17 ? 'afternoon' : 'evening'}, ${esc(me.name.split(' ')[0])}`, `${DAYS[dow(T)]}, ${fmtD(T)}`, actions);
 }
 
@@ -1302,7 +1316,8 @@ function vLeave() {
   const T = today(), year = +T.slice(0, 4), bals = balances(S.me, year);
   const mine = reqsOf('LEAVE', S.me.id).sort((a, b) => b.data.from.localeCompare(a.data.from));
   const m = ui('lvMonth', T.slice(0, 7)), days = eachDay(m + '-01', monthEnd(m));
-  const ppl = (isMgmt() ? active() : [S.me, ...myTeam().map(empById), empById(S.me.managerId)].filter(Boolean)).sort((a, b) => a.name.localeCompare(b.name));
+  // only people whose leave this user may see (the server sends nobody else's)
+  const ppl = (isMgmt() ? active() : [S.me, ...myTeam().map(empById)].filter(Boolean)).sort((a, b) => a.name.localeCompare(b.name));
   const body = `<div class="grid g3" style="margin-bottom:14px">${bals.map((b) => card(esc(b.lt.name), `<div style="font:600 2rem var(--f-display)">${b.lt.quota ? b.avail : '—'} <span class="small muted" style="font-family:var(--f-body)">${b.lt.quota ? 'days available' : 'unpaid, no balance'}</span></div>
     <div class="kv" style="margin-top:6px"><div><span>Credited</span><b>${b.entitled}</b></div><div><span>Used</span><b>${b.used}</b></div><div><span>Pending</span><b>${b.pending}</b></div><div><span>Code</span><b>${esc(b.lt.code)}</b></div></div>
     ${b.lt.accrual ? `<p class="tiny muted" style="margin:6px 0 0">Earns ${round2(b.lt.quota / 12)} per month</p>` : ''}`)).join('')}</div>
@@ -1487,11 +1502,13 @@ function vDepartments() {
   const T = today(), tab = ui('drTab', 'incoming'), mgmt = isMgmt();
   const ppl = active();
   const cards = cfg().depts.map((d) => {
-    const m = ppl.filter((e) => e.deptId === d.id), st = m.map((e) => dayStatus(e, T).code);
-    const open = S.tasks.filter((t) => t.deptId === d.id && openTask(t)), dash = ddDepts().some((x) => x.id === d.id);
+    // figures only for departments this user may see (management, the department's head); others show headcount only
+    const full = mgmt || d.headId === S.me.id;
+    const m = ppl.filter((e) => e.deptId === d.id), st = full ? m.map((e) => dayStatus(e, T).code) : [];
+    const open = full ? S.tasks.filter((t) => t.deptId === d.id && openTask(t)) : [], dash = ddDepts().some((x) => x.id === d.id);
     const inc = S.dreqs.filter((r) => r.toDept === d.id && !['RESOLVED', 'CLOSED'].includes(r.status));
     return `<section class="card"><div class="body"><div class="row" style="justify-content:space-between"><div><h2>${esc(d.name)}</h2><div class="tiny muted">${esc(d.code)} · Head: ${esc(nameOf(d.headId))}</div></div><span style="font:600 1.6rem var(--f-display)">${m.length}</span></div>
-      <div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr));margin-top:10px">${kpi('Present', st.filter(presentish).length, 'ok')}${kpi('Open tasks', open.length)}${kpi('Overdue', open.filter((t) => overdue(t)).length, open.some((t) => overdue(t)) ? 'bad' : '')}${kpi('On leave', st.filter((c) => c === 'LV').length)}${kpi('Requests in', inc.length)}${kpi('Late requests', inc.filter((r) => r.due < T).length, inc.some((r) => r.due < T) ? 'bad' : '')}</div></div>${dash ? `<div class="more"><button class="btn sm" data-a="dd-open" data-d="${d.id}">Open department dashboard</button></div>` : ''}</section>`;
+      ${full ? '' : '<p class="tiny muted" style="margin:8px 0 0">Attendance and task figures are visible to the department head and management.</p>'}<div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr));margin-top:10px;${full ? '' : 'display:none'}">${kpi('Present', st.filter(presentish).length, 'ok')}${kpi('Open tasks', open.length)}${kpi('Overdue', open.filter((t) => overdue(t)).length, open.some((t) => overdue(t)) ? 'bad' : '')}${kpi('On leave', st.filter((c) => c === 'LV').length)}${kpi('Requests in', inc.length)}${kpi('Late requests', inc.filter((r) => r.due < T).length, inc.some((r) => r.due < T) ? 'bad' : '')}</div></div>${dash ? `<div class="more"><button class="btn sm" data-a="dd-open" data-d="${d.id}">Open department dashboard</button></div>` : ''}</section>`;
   }).join('');
   const myD = S.me.deptId, heads = cfg().depts.filter((d) => d.headId === S.me.id).map((d) => d.id), mine = new Set([myD, ...heads]);
   let list = S.dreqs.slice();
@@ -1562,7 +1579,7 @@ function buildReport(key) {
     return { title: 'Approval aging — pending requests', f: [], cols: ['Code', 'Type', 'Title', 'Requester', 'With', 'Step', 'Raised', 'Age (h)', 'Waiting at step (h)', 'Response time', 'Escalated'], rows: list.map((r) => { const s = curStep(r); return [r.code, RTYPE[r.type], r.title, nameOf(r.empId), s ? nameOf(s.by) : '', s?.label || '', fmtDT(r.created), Math.round((Date.now() - r.created) / 3600000), s?.at ? Math.round((Date.now() - s.at) / 3600000) : '', pastSLA(r) ? 'LATE' : 'OK', s?.escalated ? 'Yes' : '']; }) };
   }
   if (key === 'dept') {
-    return { title: `Department MIS — ${fmtD(from)} to ${fmtD(to)}`, f: ['range'], cols: ['Department', 'Head', 'Headcount', 'Attendance %', 'Open tasks', 'Overdue', 'Blocked', 'Completed in period', 'Requests open', 'Requests late', 'Resolved on time %'], rows: cfg().depts.map((d) => {
+    return { title: `Department MIS — ${fmtD(from)} to ${fmtD(to)}`, f: ['range'], cols: ['Department', 'Head', 'Headcount', 'Attendance %', 'Open tasks', 'Overdue', 'Blocked', 'Completed in period', 'Requests open', 'Requests late', 'Resolved on time %'], rows: cfg().depts.filter((d) => isMgmt() || d.headId === S.me.id).map((d) => {
       const m2 = active().filter((e) => e.deptId === d.id); let exp = 0, pres = 0;
       for (const e of m2) for (const day of eachDay(from, to)) { const c = dayStatus(e, day).code; if (['WO', 'H', '', 'PS', 'NI'].includes(c)) continue; exp++; if (presentish(c)) pres += c === 'HD' ? 0.5 : 1; }
       const t = S.tasks.filter((x) => x.deptId === d.id), o = t.filter(openTask), inc = S.dreqs.filter((r) => r.toDept === d.id), io = inc.filter((r) => !['RESOLVED', 'CLOSED'].includes(r.status));
@@ -1676,14 +1693,14 @@ function confirmBox(title, text, onYes, { input = null, danger = true } = {}) {
 function taskForm(t) {
   const T = today(), isNew = !t;
   if (M && !M.asg) M.asg = S.ui.preAssignee ? [S.ui.preAssignee] : [];
-  const load = (id) => { const o = S.tasks.filter((x) => x.assigneeId === id && openTask(x)); return [o.length, o.filter((x) => overdue(x)).length]; };
+  const load = (id) => { if (!canSee(id)) return [null, 0]; const o = S.tasks.filter((x) => x.assigneeId === id && openTask(x)); return [o.length, o.filter((x) => overdue(x)).length]; };
   const others = S.tasks.filter((x) => openTask(x) && x.id !== t?.id).sort((a, b) => b.code.localeCompare(a.code));
   return `${mhead(isNew ? 'New task' : `Edit ${esc(t.code)}`)}<form data-f="task" data-id="${t?.id || ''}"><div class="body fgrid">
     <label class="f full">Title<input class="i" id="tf-title" name="title" required value="${esc(t?.title || '')}" placeholder="e.g. Reconcile HDFC current account — September"></label>
     <label class="f full">Details<textarea class="i" id="tf-desc" name="desc" rows="3">${esc(t?.desc || '')}</textarea></label>
     ${isNew ? `<div class="full"><label class="f">Assign to <span class="muted">(pick one or several — each person gets their own copy of the task)</span>
         <select class="i" id="tf-add" data-c="taskAdd">${peopleGroups(null, { blank: '+ Add a person…', exclude: M.asg, load: true })}</select></label>
-      <div class="row" style="margin-top:6px;gap:6px">${M.asg.map((id) => { const [o, od] = load(id); return `<span class="chip"><input type="hidden" name="assignees" value="${id}">${esc(nameOf(id))}${id === S.me.id ? ' (me)' : ''} <span class="tiny" style="${o >= 6 ? 'color:var(--warn);font-weight:600' : 'color:var(--muted)'}">${o} open${od ? ` · <span style="color:var(--bad)">${od} overdue</span>` : ''}</span><button type="button" class="chip-x" data-a="tf-rm" data-id="${id}" aria-label="Remove ${esc(nameOf(id))}">✕</button></span>`; }).join('') || '<span class="small muted">Nobody chosen yet.</span>'}
+      <div class="row" style="margin-top:6px;gap:6px">${M.asg.map((id) => { const [o, od] = load(id); return `<span class="chip"><input type="hidden" name="assignees" value="${id}">${esc(nameOf(id))}${id === S.me.id ? ' (me)' : ''} <span class="tiny" style="${o === null ? 'display:none' : o >= 6 ? 'color:var(--warn);font-weight:600' : 'color:var(--muted)'}">${o} open${od ? ` · <span style="color:var(--bad)">${od} overdue</span>` : ''}</span><button type="button" class="chip-x" data-a="tf-rm" data-id="${id}" aria-label="Remove ${esc(nameOf(id))}">✕</button></span>`; }).join('') || '<span class="small muted">Nobody chosen yet.</span>'}
         ${myTeam().length ? '<button type="button" class="btn sm ghost" data-a="tf-team">+ My whole team</button>' : ''}${!M.asg.includes(S.me.id) ? '<button type="button" class="btn sm ghost" data-a="tf-me">+ Me</button>' : ''}</div></div>`
     : `<label class="f">Assignee<select class="i" id="tf-asg" name="assignee">${peopleGroups(t.assigneeId)}</select></label>`}
     <label class="f">Priority<select class="i" id="tf-pr" name="priority">${opts(Object.entries(PRIO).map(([k, v]) => [k, v[0]]), t?.priority || 'MEDIUM')}</select></label>
@@ -1701,9 +1718,16 @@ function taskForm(t) {
     <datalist id="projects">${[...new Set(S.tasks.map((x) => x.project).filter(Boolean))].map((p) => `<option value="${esc(p)}">`).join('')}</datalist>
   </div><footer><button type="button" class="btn" data-a="close">Cancel</button><button class="btn pri" type="submit">${isNew ? 'Create task' : 'Save changes'}</button></footer></form>`;
 }
+// a record that isn't here yet: wait a few seconds for it to arrive, then say it isn't available (deleted, reassigned,
+// or not shared with this user) instead of loading forever
+function notLoaded(what) {
+  if (M && !M.waitSince) { M.waitSince = Date.now(); setTimeout(() => { if (M?.waitSince) drawModal(); }, 8100); }
+  if (!M || Date.now() - M.waitSince < 8000) return `${mhead('Opening…')}<div class="body muted">Loading the latest data…</div>`;
+  return `${mhead('Not available')}<div class="body">${empty(`This ${what} isn’t available to you — it may have been deleted or reassigned, or it isn’t shared with you.`)}</div><footer><button class="btn" data-a="close">Close</button></footer>`;
+}
 function taskDetail(id) {
   const t = S.tasks.find((x) => x.id === id);
-  if (!t) return `${mhead('Opening…')}<div class="body muted">Loading the latest data…</div>`;
+  if (!t) return notLoaded('task');
   const mine = t.assigneeId === S.me.id, mgr = canManageTask(t), st = effStatus(t), closed = !openTask(t);
   const rev = S.reqs.find((r) => r.type === 'REVIEW' && r.data.taskId === t.id && r.status === 'PENDING');
   const iReview = rev && curStep(rev)?.by === S.me.id;
@@ -1783,16 +1807,18 @@ function reqForm(type, extra = {}) {
 const DLABEL = { from: 'From', to: 'To', lt: 'Leave type', days: 'Days', half: 'Half day', session: 'Session', reason: 'Reason', doc: 'Document link', date: 'Date', inT: 'Check-in', outT: 'Check-out', kind: 'Type', location: 'Location', hours: 'Hours', category: 'Category', billDate: 'Bill date', link: 'Link', vendor: 'Vendor', document: 'Document', purpose: 'Purpose', newDue: 'New due date', oldDue: 'Current due date', note: 'Note', resubmitNote: 'Resubmission note', warnings: 'Flags' };
 function reqDetail(id) {
   const r = S.reqs.find((x) => x.id === id);
-  if (!r) return `${mhead('Opening…')}<div class="body muted">Loading the latest data…</div>`;
+  if (!r) return notLoaded('request');
   const s = curStep(r), canDecide = r.status === 'PENDING' && s?.by === S.me.id, isReq = r.empId === S.me.id || r.raisedBy === S.me.id;
   let ctx = '';
-  if (r.type === 'LEAVE') {
+  if (!canSee(r.empId) && ['LEAVE', 'CORRECTION'].includes(r.type)) {
+    ctx = '<p class="tiny muted">Leave balances, team leave and recorded attendance are visible to the employee’s managers and HR.</p>';
+  } else if (r.type === 'LEAVE') {
     const e = empById(r.empId), bals = e ? balances(e, +r.data.from.slice(0, 4)) : [];
     const mates = e ? active().filter((x) => x.id !== e.id && x.managerId && x.managerId === e.managerId) : [];
     const away = mates.filter((m) => reqsOf('LEAVE', m.id).some((x) => ['APPROVED', 'PENDING'].includes(x.status) && !x.data.cancelled && x.data.from <= r.data.to && x.data.to >= r.data.from));
     ctx = `<div class="card body" style="background:var(--sunk);border:0"><h3>Leave context</h3><div class="row small" style="margin-top:6px">${bals.map((b) => `<span>${esc(b.lt.code)}: <b>${b.lt.quota ? b.avail : '—'}</b> left</span>`).join(' · ')}</div><div class="small" style="margin-top:4px">Team members away then: ${away.length ? esc(away.map((a) => a.name).join(', ')) : 'none'}</div>${r.data.cancelOf ? '<div class="small" style="color:var(--warn);margin-top:4px">This asks to cancel leave that was already approved — approving restores the balance.</div>' : ''}</div>`;
   }
-  if (r.type === 'CORRECTION') {
+  if (r.type === 'CORRECTION' && canSee(r.empId)) {
     const e = empById(r.empId), ds = dayStatus(e, r.data.date);
     ctx = `<div class="card body" style="background:var(--sunk);border:0"><h3>Recorded on ${fmtD(r.data.date)}</h3><div class="small">${stPill(ds.code)} In ${hm(ds.inT)} · Out ${hm(ds.outT)} · punches: ${(ds.punches || []).map((p) => `${hm(p.t)} (${p.s})`).join(', ') || 'none'}</div><div class="tiny muted">Approving adds correction punches; the original punches stay.</div></div>`;
   }
@@ -1849,31 +1875,34 @@ function dreqDetail(id) {
 function empForm(id) {
   const e = id ? empById(id) : null, hr = isHR();
   if (id && !e) return null;
-  const T = today(), bals = e ? balances(e) : [];
+  // private details (and leave balances) are only sent to the person, their managers, management and payroll
+  const priv = !e || hr || canSee(e.id);
+  const T = today(), bals = e && priv ? balances(e) : [];
   const ro = !hr ? 'disabled' : '';
   return `${mhead(e ? esc(e.name) : 'Add employee', e ? `${esc(e.code)} · ${esc(e.designation || '')}` : 'Link their Claude login below so they’re recognised when they open OfficeHub')}
   <form data-f="emp" data-id="${e?.id || ''}"><div class="body fgrid">
     <label class="f">Full name<input class="i" id="ef-n" name="name" required value="${esc(e?.name || '')}" ${ro}></label>
     <label class="f">Employee code<input class="i" id="ef-c" name="code" required value="${esc(e?.code || '')}" ${ro}></label>
     <label class="f">Work email<input class="i" id="ef-e" type="email" name="email" value="${esc(e?.email || '')}" ${ro}></label>
-    <label class="f">Phone<input class="i" id="ef-p" name="phone" value="${esc(e?.phone || '')}" ${ro}></label>
+    ${priv ? `<label class="f">Phone<input class="i" id="ef-p" name="phone" value="${esc(e?.phone || '')}" ${ro}></label>` : ''}
     <label class="f">Designation<input class="i" id="ef-d" name="designation" value="${esc(e?.designation || '')}" ${ro}></label>
     <label class="f">Department<select class="i" id="ef-dp" name="deptId" ${ro}>${deptOpts(e?.deptId, '—')}</select></label>
     <label class="f">Reports to<select class="i" id="ef-m" name="managerId" ${ro}>${peopleOpts(e?.managerId, '—', active().filter((x) => x.id !== e?.id).map((x) => x.id))}</select></label>
     <label class="f">Role in this app<select class="i" id="ef-r" name="role" ${ro}>${opts([['EMPLOYEE', 'Employee'], ['MANAGER', 'Manager'], ['HR', 'HR'], ['DIRECTOR', 'Director'], ['ADMIN', 'Administrator']], e?.role || 'EMPLOYEE')}</select></label>
-    <label class="f">Biometric ID (on the machine)<input class="i" id="ef-b" name="bioId" value="${esc(e?.bioId || '')}" ${ro}></label>
+    ${priv ? `<label class="f">Biometric ID (on the machine)<input class="i" id="ef-b" name="bioId" value="${esc(e?.bioId || '')}" ${ro}></label>` : ''}
     <label class="f">Status<select class="i" id="ef-s" name="status" ${ro}>${opts([['ACTIVE', 'Active'], ['PROBATION', 'Probation'], ['ON_NOTICE', 'On notice'], ['EXITED', 'Exited']], e?.status || 'ACTIVE')}</select></label>
     <label class="f">Joining date<input class="i" id="ef-j" type="date" name="joining" value="${e?.joining || ''}" ${ro}></label>
-    <label class="f">Probation ends<input class="i" id="ef-pe" type="date" name="probEnd" value="${e?.probEnd || ''}" ${ro}></label>
-    <label class="f">Date of birth<input class="i" id="ef-dob" type="date" name="dob" value="${e?.dob || ''}" ${ro}></label>
-    <label class="f">Last working day (exit)<input class="i" id="ef-x" type="date" name="exitDate" value="${e?.exitDate || ''}" ${ro}></label>
-    <label class="f full">Exit clearance / handover notes<input class="i" id="ef-cl" name="clearance" value="${esc(e?.clearance || '')}" placeholder="Handover done; laptop returned; accounts cleared…" ${ro}></label>
+    ${priv ? `<label class="f">Probation ends<input class="i" id="ef-pe" type="date" name="probEnd" value="${e?.probEnd || ''}" ${ro}></label>` : ''}
+    ${priv ? `<label class="f">Date of birth<input class="i" id="ef-dob" type="date" name="dob" value="${e?.dob || ''}" ${ro}></label>` : ''}
+    ${priv ? `<label class="f">Last working day (exit)<input class="i" id="ef-x" type="date" name="exitDate" value="${e?.exitDate || ''}" ${ro}></label>` : ''}
+    ${priv ? `<label class="f full">Exit clearance / handover notes<input class="i" id="ef-cl" name="clearance" value="${esc(e?.clearance || '')}" placeholder="Handover done; laptop returned; accounts cleared…" ${ro}></label>` : ''}
     ${canSalary() ? (ensurePay(), PAY.err ? '<p class="tiny muted full">Salary is protected — you need Editor access to the app to see or change it.</p>' : `<label class="f">Monthly salary (₹, gross)<input class="i" id="ef-sal" name="salary" type="number" min="0" step="100" value="${e ? (PAY.map[e.id]?.monthly ?? '') : ''}" placeholder="e.g. 35000"></label><span class="tiny muted" style="align-self:end">Visible only to HR and administrators.</span>`) : ''}
-    <label class="f full">Assets issued<input class="i" id="ef-as" name="assets" value="${esc(e?.assets || '')}" placeholder="Laptop Dell 5440 (SN…), SIM, ID card" ${ro}></label>
+    ${priv ? `<label class="f full">Assets issued<input class="i" id="ef-as" name="assets" value="${esc(e?.assets || '')}" placeholder="Laptop Dell 5440 (SN…), SIM, ID card" ${ro}></label>` : ''}
     ${hr ? `<div class="full ppl"><div class="small muted" style="margin-bottom:4px">Claude login: ${e?.userId ? '<span class="pill t-ok">Linked</span>' : '<span class="pill">Not linked</span>'} — search by name to link</div>
       <input class="i" id="ef-find" data-search="people" placeholder="Search your organisation by name or email" autocomplete="off"><input type="hidden" id="ef-uid" name="userId" value="${esc(S.ui.pickUid ?? e?.userId ?? '')}"><div class="menu" id="ef-menu" hidden></div></div>` : ''}
   </div>
-  ${e ? `<div class="body" style="border-top:1px solid var(--line)"><h3>Leave balances ${T.slice(0, 4)}</h3><div class="row small" style="margin-top:6px">${bals.map((b) => `<span>${esc(b.lt.code)} <b>${b.lt.quota ? b.avail : '—'}</b> left (${b.used} used)</span>`).join(' · ')}</div>
+  ${e && !priv ? '<div class="body small muted" style="border-top:1px solid var(--line)">Leave balances and private details are visible to the employee, their managers and HR.</div>' : ''}
+  ${e && priv ? `<div class="body" style="border-top:1px solid var(--line)"><h3>Leave balances ${T.slice(0, 4)}</h3><div class="row small" style="margin-top:6px">${bals.map((b) => `<span>${esc(b.lt.code)} <b>${b.lt.quota ? b.avail : '—'}</b> left (${b.used} used)</span>`).join(' · ')}</div>
     ${hr ? `<div class="row" style="margin-top:8px"><select class="i" id="ef-adj-lt" style="width:auto">${opts(cfg().leaveTypes.map((l) => [l.code, l.code]))}</select><input class="i" id="ef-adj-v" type="number" step="0.5" placeholder="+/- days" style="width:110px"><input class="i" id="ef-adj-r" placeholder="Reason (kept in audit log)" style="flex:1;min-width:140px"><button type="button" class="btn" data-a="leave-adj" data-id="${e.id}">Adjust</button></div>` : ''}
     ${(e.history || []).length ? `<h3 style="margin-top:12px">History</h3>${e.history.slice().reverse().map((h) => `<div class="tiny" style="margin-top:4px"><b>${esc(h.kind)}</b> ${fmtD(h.date)} — ${esc(h.from || '—')} → ${esc(h.to || '—')}</div>`).join('')}` : ''}</div>` : ''}
   <footer>${e ? `<button type="button" class="btn" data-a="new-task" data-assignee="${e.id}">Assign a task</button>${e.id !== S.me.id ? `<button type="button" class="btn" data-a="dm" data-id="${e.id}">Message</button>` : ''}${hr && e.userId && e.id !== S.me.id ? `<button type="button" class="btn danger" data-a="acct-reset" data-id="${e.id}">Reset password</button>` : ''}` : ''}<span style="flex:1"></span><button type="button" class="btn" data-a="close">Close</button>${hr ? `<button class="btn pri" type="submit">${e ? 'Save' : 'Add employee'}</button>` : ''}</footer></form>`;
@@ -4619,7 +4648,11 @@ const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000)
 
 function vDeptDash() {
   if (!canDeptDash()) return shell(empty('This dashboard is for department heads, Admin, HR and Directors.'), 'Department dashboard');
-  const dept = ddDept(), T = today();
+  const dept = ddDept(), T = today(), tab = ui('ddTab', 'today');
+  if (tab !== 'today') {
+    const other = { updates: ddUpdates, approvals: ddApprovals, workload: ddWorkload, reports: ddReports, wfh: ddWfhTab }[tab];
+    if (other) return shell(ddTabs(tab) + other(dept), 'Department dashboard', `${esc(dept.name)} — ${DD_TABS.find((x) => x[0] === tab)[1].toLowerCase()}`);
+  }
   let d = ui('ddDate', T); if (d > T) d = T;
   const minD = `${+T.slice(0, 4) - 1}-01-01`; if (d < minD) d = minD;
   const all = active().filter((e) => e.deptId === dept.id).sort((a, b) => a.name.localeCompare(b.name)).map((e) => ddRow(e, d));
@@ -4645,7 +4678,7 @@ function vDeptDash() {
   const taskCell = (r) => `<div class="small"><b>${r.open.length}</b> open${r.late.length ? ` · <span style="color:var(--bad);font-weight:600">${r.late.length} overdue</span>` : ''}${r.blocked.length ? ` · <span style="color:var(--bad)">${r.blocked.length} blocked</span>` : ''}</div>
     <div class="tiny muted">${r.doneOn.length ? `${r.doneOn.length} completed ${d === T ? 'today' : 'that day'} · ` : ''}${r.next ? `next due ${fmtD(r.next.due)}` : 'no deadlines'}</div>`;
   const attCell = (r) => `${r.s.code ? stPill(r.s.code, r.s.note) : ''}${r.cat === 'wfh' && r.s.code !== 'WFH' && r.s.code !== 'OD' ? ` <span class="pill t-info">${r.rem.data.kind === 'OD' ? 'OD' : 'WFH'}</span>` : ''}${r.s.lateMin ? `<div class="tiny" style="color:var(--warn)">${r.s.lateMin} min late</div>` : ''}${ddLocCell(r)}`;
-  const body = `
+  const body = `${ddTabs('today')}
     <div class="filters dd-filters">
       ${multi ? `<select class="i" id="dd-dept" data-c="ddDept" aria-label="Department">${opts(ddDepts().map((x) => [x.id, x.name]), dept.id)}</select>` : ''}
       <input type="date" class="i" id="dd-date" data-c="ddDate" value="${d}" max="${T}" min="${minD}" aria-label="Date">
@@ -4656,7 +4689,7 @@ function vDeptDash() {
     </div>
     <div class="kstrip dd-kpis">${kpis.map(([l, v, c, k]) => `<button class="kt" ${k ? `data-a="ui" data-k="ddCat" data-v="${k}" title="Show only: ${esc(l)}"` : 'style="cursor:default"'}><span class="l">${esc(l)}</span><span class="v ${c}">${v}</span></button>`).join('')}</div>
     ${card(`${esc(dept.name)} · ${DAYS[dow(d)]} ${fmtD(d)} · ${all.length} people · head: ${esc(head)}`, rows.length ? `<div class="tbl-wrap"><table class="t dd-t"><thead><tr><th>Employee</th><th>Attendance</th><th>In</th><th>Out</th><th>Working on</th><th>Tasks</th><th>Work log</th></tr></thead><tbody>
-      ${rows.map((r) => `<tr class="click" data-a="dd-emp" data-e="${r.e.id}" data-d="${d}"><td>${person(r.e.id, esc(r.e.designation || ''))}</td>
+      ${rows.map((r) => `<tr class="click" data-a="dd-emp" data-e="${r.e.id}" data-d="${d}"><td>${person(r.e.id, r.e.designation || '')}</td>
         <td>${attCell(r)}</td><td class="small">${r.s.inT ? hm(r.s.inT) : '—'}</td><td class="small">${r.s.outT ? hm(r.s.outT) : '—'}</td>
         <td style="max-width:240px">${working(r)}</td><td>${taskCell(r)}</td>
         <td class="small">${r.wl ? `<span style="color:var(--ok)">Submitted ${hm(r.wl.at)}</span>${r.wl.blockers ? '<div class="tiny" style="color:var(--bad)">Has blockers</div>' : ''}` : '<span class="muted">Not submitted</span>'}</td></tr>`).join('')}
@@ -4672,7 +4705,7 @@ function ddEmpModal(empId, d) {
   if (!e || !ddDepts().some((x) => x.id === e.deptId)) return `${mhead('Not available')}<div class="body">${empty('This person isn’t in a department you manage.')}</div><footer><button class="btn" data-a="close">Close</button></footer>`;
   const r = ddRow(e, d), T = today();
   const tl = (list) => list.map((t) => `<li style="display:block"><div class="row" style="justify-content:space-between;gap:8px"><span class="grow" style="min-width:0"><b class="small">${esc(t.code)}</b> <span class="small">${esc(t.title)}</span></span><span class="row" style="gap:4px">${overdue(t) ? '<span class="pill t-bad">Overdue</span>' : ''}<span class="pill ${TSTAT[effStatus(t)]?.[1] || ''}">${TSTAT[effStatus(t)]?.[0] || esc(t.status)}</span></span></div>
-    <div class="tiny muted">${PRIO[t.priority]?.[0] || ''}${t.due ? ` · due ${fmtD(t.due)}` : ''}${ddProgress(t) ? ` · ${ddProgress(t)}` : ''}${t.hours ? ` · ${t.hours} h logged` : ''}${t.status === 'BLOCKED' && t.blockedReason ? ` · blocked: ${esc(t.blockedReason)}` : ''}${t.status === 'DONE' && t.completedAt ? ` · completed ${fmtD(ymd(new Date(t.completedAt)))}` : ''}</div></li>`).join('');
+    <div class="tiny muted">${PRIO[t.priority]?.[0] || ''}${t.due ? ` · due ${fmtD(t.due)}` : ''}${ddProgress(t) ? ` · ${ddProgress(t)}` : ''}${t.hours ? ` · ${+t.hours || 0} h logged` : ''}${t.status === 'BLOCKED' && t.blockedReason ? ` · blocked: ${esc(t.blockedReason)}` : ''}${t.status === 'DONE' && t.completedAt ? ` · completed ${fmtD(ymd(new Date(t.completedAt)))}` : ''}</div></li>`).join('');
   const recentDone = r.mine.filter((t) => t.status === 'DONE').sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0)).slice(0, 5);
   const wl = r.wl;
   const lines = (s) => esc(s || '').split('\n').filter(Boolean).map((x) => `<div class="small">${x}</div>`).join('') || '<div class="small muted">—</div>';
@@ -4689,6 +4722,116 @@ function ddEmpModal(empId, d) {
   </div><footer><button class="btn" data-a="close">Close</button>${canView('tasks') ? `<button class="btn" data-a="dd-tasks" data-e="${e.id}">Open in Tasks</button>` : ''}</footer>`;
 }
 
+/* ── more of the department dashboard: work updates, approvals, workload, reports and WFH ── */
+const DD_TABS = [['today', 'Team today'], ['updates', 'Work updates'], ['approvals', 'Approvals'], ['workload', 'Workload'], ['reports', 'Reports'], ['wfh', 'WFH']];
+const ddTabs = (tab) => `<div class="tabs" role="tablist">${DD_TABS.map(([k, l]) => `<button class="tab" role="tab" aria-selected="${tab === k}" data-a="ui" data-k="ddTab" data-v="${k}">${l}</button>`).join('')}</div>`;
+const ddDeptPick = (dept) => (ddDepts().length > 1 ? `<select class="i" id="dd-dept2" data-c="ddDept" aria-label="Department" style="max-width:240px">${opts(ddDepts().map((x) => [x.id, x.name]), dept.id)}</select>` : '');
+const ddPeople = (dept) => active().filter((e) => e.deptId === dept.id).sort((a, b) => a.name.localeCompare(b.name));
+
+function ddUpdates(dept) {
+  const T = today(), from = ui('ddUpFrom', addDays(T, -6)), only = ui('ddUpOnly', '');
+  const ids = new Set(ddPeople(dept).map((e) => e.id));
+  const logs = S.wlogs.filter((w) => ids.has(w.empId) && w.date >= from && w.date <= T && (only !== 'blockers' || w.blockers) && (only !== 'unreviewed' || !w.reviewedBy)).sort((a, b) => b.date.localeCompare(a.date) || nameOf(a.empId).localeCompare(nameOf(b.empId)));
+  const lines = (s) => esc(s || '').split('\n').filter(Boolean).map((x) => `<div class="small">${x}</div>`).join('') || '<span class="small muted">—</span>';
+  return `<div class="filters dd-filters">${ddDeptPick(dept)}<label class="small row" style="gap:6px">From <input type="date" class="i" id="dd-upfrom" data-c="ddUpFrom" value="${from}" max="${T}" min="${addDays(T, -DD_WL_DAYS)}" style="width:auto"></label>
+      <select class="i" id="dd-uponly" data-c="ddUpOnly" style="max-width:220px">${opts([['blockers', 'Only with blockers'], ['unreviewed', 'Not reviewed yet']], only, 'All updates')}</select></div>
+    ${logs.length ? `<div class="grid" style="gap:10px">${logs.map((l) => `<section class="card"><div class="body">
+      <div class="row" style="justify-content:space-between;gap:8px">${person(l.empId, `${DAYS[dow(l.date)]} ${fmtD(l.date)} · submitted ${hm(l.at)}`)}${l.blockers ? '<span class="pill t-bad">Blockers</span>' : ''}</div>
+      <div class="dd-wl"><div><b class="tiny">Done</b>${lines(l.done)}</div><div><b class="tiny">Pending</b>${lines(l.pending)}</div>${l.blockers ? `<div><b class="tiny" style="color:var(--bad)">Blockers</b>${lines(l.blockers)}</div>` : ''}${l.tomorrow ? `<div><b class="tiny">Next</b>${lines(l.tomorrow)}</div>` : ''}</div>
+      ${l.reviewedBy ? `<div class="tiny muted" style="margin-top:8px">Reviewed by ${esc(nameOf(l.reviewedBy))}${l.review ? `: ${esc(l.review)}` : ''}</div>`
+        : `<form data-f="wl-review" data-id="${l.id}" class="row" style="margin-top:10px;flex-wrap:nowrap"><input class="i" name="note" placeholder="Feedback (optional)" aria-label="Feedback for ${esc(nameOf(l.empId))}"><button class="btn sm">Mark reviewed</button></form>`}
+    </div></section>`).join('')}</div>` : empty('No work updates in this period.')}
+    <p class="tiny muted">The daily work logs your team submitted. Days without a log simply don’t appear.</p>`;
+}
+
+function ddApprovals(dept) {
+  const ids = new Set(ddPeople(dept).map((e) => e.id)), show = ui('ddApShow', 'pending');
+  const list = S.reqs.filter((r) => ids.has(r.empId) && (show === 'pending' ? r.status === 'PENDING' : r.status !== 'PENDING' && (r.decided || r.created || 0) >= Date.now() - 30 * 864e5))
+    .sort((a, b) => (pendingWith(b) - pendingWith(a)) || (a.created || 0) - (b.created || 0));
+  const what = (r) => (r.type === 'LEAVE' ? `${esc(r.data.lt || '')} · ${fmtD(r.data.from)}${r.data.to !== r.data.from ? ' – ' + fmtD(r.data.to) : ''} · ${+r.data.days || 0} day(s)`
+    : r.type === 'WFH_OD' ? `${r.data.kind === 'OD' ? 'Official duty' : 'WFH'} · ${fmtD(r.data.from)}${r.data.to && r.data.to !== r.data.from ? ' – ' + fmtD(r.data.to) : ''}`
+    : r.type === 'CORRECTION' ? `${fmtD(r.data.date)} · in ${esc(r.data.inT || '—')} · out ${esc(r.data.outT || '—')}` : esc(r.title || ''));
+  return `<div class="filters dd-filters">${ddDeptPick(dept)}<select class="i" id="dd-apshow" data-c="ddApShow" style="max-width:240px">${opts([['pending', 'Pending'], ['decided', 'Decided (last 30 days)']], show)}</select></div>
+    ${card(`Requests from your team · ${list.length}`, dataTable('ddAp', list, [
+      { k: 'code', label: 'Request', v: (r) => r.code, html: (r) => `<b class="small">${esc(r.code)}</b>${pendingWith(r) ? ' <span class="pill t-warn">Your decision</span>' : ''}<div class="tiny muted">${esc(RTYPE[r.type] || r.type)}</div>` },
+      { k: 'emp', label: 'Employee', v: (r) => nameOf(r.empId), html: (r) => person(r.empId, empById(r.empId)?.designation || '') },
+      { k: 'what', label: 'Details', v: (r) => r.data?.from || r.data?.date || '', html: (r) => `<span class="small">${what(r)}</span>${r.data?.reason ? `<div class="tiny muted">${esc(String(r.data.reason).slice(0, 100))}</div>` : ''}` },
+      { k: 'with', label: 'With', v: (r) => (r.status === 'PENDING' ? nameOf(curStep(r)?.by) : ''), html: (r) => (r.status === 'PENDING' ? `<span class="small">${esc(nameOf(curStep(r)?.by))}</span>` : '—') },
+      { k: 'status', label: 'Status', v: (r) => r.status, html: (r) => pill(RSTAT, r.status) },
+    ], { name: `${dept.name} requests`, click: (r) => `data-a="req" data-id="${r.id}"`, empty: show === 'pending' ? 'Nothing pending from your team.' : 'No decisions in the last 30 days.' }), { list: true })}
+    <p class="tiny muted">Open a request to approve, reject or send it back. Approvals follow the existing chain (reporting manager, then HR where the policy needs it); you can decide when the request is waiting for you.</p>`;
+}
+
+function ddWorkload(dept) {
+  const T = today(), ppl = ddPeople(dept);
+  const rows = ppl.map((e) => {
+    const mine = S.tasks.filter((t) => t.assigneeId === e.id && t.status !== 'CANCELLED'), open = mine.filter(openTask);
+    const lastLog = S.wlogs.filter((w) => w.empId === e.id).map((w) => w.date).sort().pop() || null;
+    const done30 = mine.filter((t) => t.status === 'DONE' && t.completedAt && ymd(new Date(t.completedAt)) >= addDays(T, -30)).length;
+    return { e, open: open.length, overdue: open.filter((t) => overdue(t)).length, blocked: open.filter((t) => t.status === 'BLOCKED').length, review: open.filter((t) => t.status === 'IN_REVIEW').length,
+      week: open.filter((t) => t.due && t.due >= T && t.due <= addDays(T, 7)).length, done30, lastLog };
+  });
+  const avg = rows.length ? rows.reduce((s, r) => s + r.open, 0) / rows.length : 0;
+  const since3 = (() => { let n = 0, d = T; while (n < 3) { d = addDays(d, -1); if (!weeklyOff(d) && !holidayOn(d)) n++; } return d; })();
+  for (const r of rows) {
+    r.why = [];
+    if (r.overdue) r.why.push(`${r.overdue} overdue`);
+    if (r.blocked) r.why.push(`${r.blocked} blocked`);
+    if (avg && r.open >= Math.max(4, avg * 2)) r.why.push('much more open work than the team average');
+    const lv = leaveOn(r.e.id, T);
+    if (S.wlogs.some((w) => w.empId === r.e.id) && (!r.lastLog || r.lastLog < since3) && !lv) r.why.push('no work log for 3 working days');
+  }
+  const max = Math.max(1, ...rows.map((r) => r.open));
+  return `<div class="filters dd-filters">${ddDeptPick(dept)}</div>
+    <div class="kstrip dd-kpis">${[['People', rows.length], ['Open tasks', rows.reduce((s, r) => s + r.open, 0)], ['Overdue', rows.reduce((s, r) => s + r.overdue, 0)], ['Blocked', rows.reduce((s, r) => s + r.blocked, 0)], ['Average open per person', round2(avg)], ['May need support', rows.filter((r) => r.why.length).length]].map(([l, v]) => `<div class="kt" style="cursor:default"><span class="l">${l}</span><span class="v">${v}</span></div>`).join('')}</div>
+    ${card('Task distribution', dataTable('ddWl', rows, [
+      { k: 'name', label: 'Employee', v: (r) => r.e.name, html: (r) => person(r.e.id, r.e.designation || '') },
+      { k: 'open', label: 'Open', num: true, v: (r) => r.open, html: (r) => `<b>${r.open}</b><div class="bar" style="width:90px"><span style="width:${Math.round((r.open / max) * 100)}%"></span></div>` },
+      { k: 'od', label: 'Overdue', num: true, v: (r) => r.overdue, html: (r) => (r.overdue ? `<b style="color:var(--bad)">${r.overdue}</b>` : '0') },
+      { k: 'bl', label: 'Blocked', num: true, v: (r) => r.blocked }, { k: 'rv', label: 'In review', num: true, v: (r) => r.review }, { k: 'wk', label: 'Due in 7 days', num: true, v: (r) => r.week },
+      { k: 'done', label: 'Completed (30 days)', num: true, v: (r) => r.done30 },
+      { k: 'log', label: 'Last work log', v: (r) => r.lastLog || '', html: (r) => (r.lastLog ? fmtD(r.lastLog) : '<span class="muted">—</span>') },
+      { k: 'why', label: 'May need support', v: (r) => r.why.length, html: (r) => (r.why.length ? `<span class="small" style="color:var(--warn)">${esc(r.why.join(' · '))}</span>` : '<span class="tiny muted">—</span>') },
+    ], { name: `${dept.name} workload`, click: (r) => `data-a="dd-emp" data-e="${r.e.id}" data-d="${T}"` }), { list: true })}
+    <p class="tiny muted">From tasks assigned to each person (cancelled ones excluded). “May need support” lists the reasons; it isn’t a rating. Tasks have no effort estimates, so workload is counted in tasks.</p>`;
+}
+
+function ddReports(dept) {
+  const m = ui('ddRepM', thisMonth()), ppl = ddPeople(dept), [from, to] = periodRange('month', m);
+  const rows = ppl.map((e) => {
+    const s = monthSummary(e, m), mine = S.tasks.filter((t) => t.assigneeId === e.id && t.status !== 'CANCELLED');
+    const done = mine.filter((t) => t.status === 'DONE' && t.completedAt && ymd(new Date(t.completedAt)) >= from && ymd(new Date(t.completedAt)) <= to);
+    return { e, s, done: done.length, onTime: done.filter((t) => ymd(new Date(t.completedAt)) <= t.due).length, open: mine.filter(openTask).length, overdue: mine.filter((t) => overdue(t)).length,
+      leaveReq: reqsOf('LEAVE', e.id).filter((r) => r.data.from <= to && r.data.to >= from).length, wfhReq: reqsOf('WFH_OD', e.id).filter((r) => r.data.from <= to && (r.data.to || r.data.from) >= from).length };
+  });
+  const n = (k, label, f) => ({ k, label, num: true, v: f });
+  return `<div class="filters dd-filters">${ddDeptPick(dept)}<select class="i" id="dd-repm" data-c="ddRepM" style="max-width:200px" aria-label="Month">${monthOpts(m)}</select></div>
+    ${card(`${esc(dept.name)} · ${fmtM(m)}${m === thisMonth() ? ' (so far)' : ''}`, dataTable('ddRep', rows, [
+      { k: 'name', label: 'Employee', v: (r) => r.e.name }, n('work', 'Working days', (r) => r.s.work), n('present', 'Present', (r) => r.s.present), n('late', 'Late', (r) => r.s.late), n('absent', 'Absent', (r) => r.s.absent),
+      n('half', 'Half days', (r) => r.s.half), n('leave', 'Leave days', (r) => r.s.leave + r.s.lwp), n('wfh', 'WFH / OD days', (r) => r.s.wfh + r.s.od), n('done', 'Tasks completed', (r) => r.done), n('ontime', 'On time', (r) => r.onTime),
+      n('open', 'Open now', (r) => r.open), n('od', 'Overdue now', (r) => r.overdue), n('lr', 'Leave requests', (r) => r.leaveReq), n('wr', 'WFH requests', (r) => r.wfhReq),
+    ], { name: `${dept.name} report ${m}` }), { list: true })}
+    <p class="tiny muted">Attendance from check-ins, approved leave and approved WFH / official duty; tasks completed by their completion date. Use Export for a spreadsheet.</p>`;
+}
+
+function ddWfhTab(dept) {
+  const T = today(), d = ui('ddWfhDate', T) > T ? T : ui('ddWfhDate', T), ppl = ddPeople(dept);
+  const remote = ppl.map((e) => ({ e, rem: remoteOn(e.id, d), s: dayStatus(e, d) })).filter((x) => x.rem);
+  const upcoming = S.reqs.filter((r) => r.type === 'WFH_OD' && ppl.some((e) => e.id === r.empId) && ['APPROVED', 'PENDING'].includes(r.status) && (r.data.to || r.data.from) > d && r.data.from <= addDays(T, 14)).sort((a, b) => a.data.from.localeCompare(b.data.from));
+  const loc = (x) => {
+    if (!seesLocOf(x.e.id)) return '<span class="tiny muted">Only Admin, HR and Manager accounts can see locations</span>';
+    const l = locOf(x.e.id, d), st = wfhState(l), p = lastPing(l);
+    const txt = { live: 'Sharing live', outdated: 'Live, but outdated', stopped: 'Stopped sharing', once: 'Shared once', none: 'No location shared' }[st];
+    return `<span class="small" style="${st === 'live' ? 'color:var(--ok)' : st === 'outdated' ? 'color:var(--warn)' : ''}">${txt}${p ? ` · ${hm(p.t)}` : ''}</span>${p ? ` <button class="btn sm ghost" data-a="loc-view" data-e="${x.e.id}" data-d="${d}" style="padding:0 4px">Trail</button>` : ''}`;
+  };
+  return `<div class="filters dd-filters">${ddDeptPick(dept)}<input type="date" class="i" id="dd-wfhdate" data-c="ddWfhDate" value="${d}" max="${T}" min="${addDays(T, -DD_LOC_DAYS)}" style="max-width:200px" aria-label="Date"></div>
+    ${card(`Working remotely · ${fmtD(d)} · ${remote.length}`, remote.length ? `<div class="tbl-wrap"><table class="t"><thead><tr><th>Employee</th><th>Type</th><th>Attendance</th><th>In</th><th>Out</th><th>Location</th></tr></thead><tbody>
+      ${remote.map((x) => `<tr><td>${person(x.e.id, x.e.designation || '')}</td><td><span class="pill t-info">${x.rem.data.kind === 'OD' ? 'Official duty' : 'WFH'}</span></td><td>${x.s.code ? stPill(x.s.code, x.s.note) : ''}</td><td class="small">${x.s.inT ? hm(x.s.inT) : '—'}</td><td class="small">${x.s.outT ? hm(x.s.outT) : '—'}</td><td>${loc(x)}</td></tr>`).join('')}
+    </tbody></table></div>` : empty('Nobody in this department is working remotely that day.'), { list: true })}
+    ${card(`Coming up · next 14 days · ${upcoming.length}`, upcoming.length ? `<ul class="list">${upcoming.map((r) => `<li data-a="req" data-id="${r.id}" style="cursor:pointer"><span class="grow small">${esc(nameOf(r.empId))} · ${r.data.kind === 'OD' ? 'Official duty' : 'WFH'} · ${fmtD(r.data.from)}${r.data.to && r.data.to !== r.data.from ? ' – ' + fmtD(r.data.to) : ''}</span>${pill(RSTAT, r.status)}</li>`).join('')}</ul>` : `<div class="body">${empty('No upcoming WFH or official duty.')}</div>`, { list: true })}
+    ${canSeeLocations() ? '<p class="tiny"><button class="btn sm ghost" data-a="nav" data-v="wfhlive">Open the live WFH map</button></p>' : ''}`;
+}
+
 async function ddAction(a, el) {
   switch (a) {
     case 'dd-emp': return openModal(() => ddEmpModal(el.dataset.e, el.dataset.d));
@@ -4703,11 +4846,336 @@ async function ddAction(a, el) {
 .dd-kpis{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}
 button.kt{font:inherit}
 .dd-t td{vertical-align:top}
+.dd-wl{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:8px}
+</style>
+
+<script>
+/* ═════════════ Role dashboards: My workspace (everyone), HR dashboard, Management dashboard ═════════════
+   The department manager dashboard is in part17. Everything here is computed from records the server already sends
+   to this viewer (server/people-rules.js): the person themselves, their team, the records that name them, and —
+   for Admin, HR and Directors — everyone. Nothing is estimated or invented; a missing record is shown as missing. */
+
+// ── one person's month, from the same dayStatus the rest of the app uses ──
+const leaveType = (code) => cfg().leaveTypes.find((l) => l.code === code) || null;
+const unpaidLeave = (lv) => !!lv && (leaveType(lv.data.lt)?.unpaid || lv.data.lt === 'LWP'); // as payroll does
+function monthSummary(e, m) {
+  const T = today(), end = monthEnd(m) < T ? monthEnd(m) : T;
+  const r = { days: 0, work: 0, present: 0, late: 0, absent: 0, half: 0, leave: 0, lwp: 0, wfh: 0, od: 0, missing: 0, off: 0, pending: 0, halfLeavePaid: 0 };
+  if (m + '-01' > T) return { ...r, payable: 0 };
+  for (const d of eachDay(m + '-01', end)) {
+    const s = dayStatus(e, d);
+    if (!s.code) continue; // before joining / after leaving
+    r.days++;
+    if (s.code === 'WO' || s.code === 'H' || weeklyOff(d) || holidayOn(d)) { r.off++; continue; } // incl. weekends inside a leave
+    if (s.code === 'PS') { r.pending++; continue; }
+    if (s.code === 'NI') continue; // today, not checked in yet
+    r.work++;
+    const lv = leaveOn(e.id, d), rem = remoteOn(e.id, d);
+    if (s.code === 'LV') { if (unpaidLeave(lv)) r.lwp++; else r.leave++; continue; }
+    if (rem) { if (rem.data.kind === 'OD') r.od++; else r.wfh++; }
+    if (s.code === 'HD') { r.half++; if (lv?.data.half && !unpaidLeave(lv)) r.halfLeavePaid++; }
+    else if (s.code === 'A') r.absent++;
+    else if (presentish(s.code)) r.present++;
+    if (s.code === 'L') r.late++;
+    if (s.code === 'I') r.missing++;
+  }
+  // payroll input, not a salary: days worked + paid leave, half days count ½ (plus ½ when the other half is paid leave)
+  r.payable = round2(r.present + r.leave + r.half * 0.5 + r.halfLeavePaid * 0.5);
+  return r;
+}
+const thisMonth = () => today().slice(0, 7);
+const monthOpts = (sel, n = 15) => { const out = []; let m = thisMonth(); for (let i = 0; i < n; i++) { out.push([m, fmtM(m)]); m = addDays(m + '-01', -1).slice(0, 7); } return opts(out, sel); };
+
+// ── a sortable, paginated table with export (state in S.ui[id + …]) ──
+const TBL = {};
+function dataTable(id, rows, cols, { pageSize = 25, name = 'Export', empty: emptyMsg = 'Nothing to show.', click = null } = {}) {
+  const sk = ui(id + 'Sort', ''), dir = ui(id + 'Dir', 'asc'), col = cols.find((c) => c.k === sk);
+  let list = rows.slice();
+  if (col) list.sort((a, b) => { const x = col.v(a), y = col.v(b); const c = typeof x === 'number' && typeof y === 'number' ? x - y : String(x ?? '').localeCompare(String(y ?? ''), undefined, { numeric: true }); return dir === 'desc' ? -c : c; });
+  TBL[id] = { rows: list, cols, name };
+  const pages = Math.max(1, Math.ceil(list.length / pageSize)), page = Math.min(+ui(id + 'Page', 0) || 0, pages - 1), shown = list.slice(page * pageSize, page * pageSize + pageSize);
+  if (!list.length) return empty(emptyMsg);
+  const th = (c) => `<th class="${c.num ? 'num' : ''}"><button class="th-sort" data-a="rd-sort" data-t="${id}" data-k="${c.k}" aria-label="Sort by ${esc(c.label)}">${esc(c.label)}${sk === c.k ? (dir === 'asc' ? ' ▲' : ' ▼') : ''}</button></th>`;
+  return `<div class="tbl-wrap"><table class="t rd-t"><thead><tr>${cols.map(th).join('')}</tr></thead><tbody>
+    ${shown.map((r) => `<tr ${click ? `class="click" ${click(r)}` : ''}>${cols.map((c) => `<td class="${c.num ? 'num' : ''}">${c.html ? c.html(r) : esc(String(c.v(r) ?? '—'))}</td>`).join('')}</tr>`).join('')}
+  </tbody></table></div>
+  <div class="rd-pager"><span class="tiny muted">${list.length} row${list.length === 1 ? '' : 's'}${pages > 1 ? ` · page ${page + 1} of ${pages}` : ''}</span>
+    <span class="row" style="gap:6px">${pages > 1 ? `<button class="btn sm ghost" data-a="rd-page" data-t="${id}" data-p="${page - 1}" ${page === 0 ? 'disabled' : ''}>‹ Previous</button><button class="btn sm ghost" data-a="rd-page" data-t="${id}" data-p="${page + 1}" ${page >= pages - 1 ? 'disabled' : ''}>Next ›</button>` : ''}
+    <button class="btn sm" data-a="rd-export" data-t="${id}">Export</button></span></div>`;
+}
+
+/* ═════════════ My workspace — on everyone's Dashboard ═════════════ */
+const PAYSLIP = { sub: false, runs: {} };
+function ensurePayslips() {
+  // the server sends each person only their own line of finalised payroll months (salary users get everything)
+  if (PAYSLIP.sub || !S.db) return;
+  PAYSLIP.sub = true;
+  S.db.collection('payroll').onSnapshot((q) => { const m = {}; q.docs.forEach((d) => { m[d.id] = { id: d.id, ...d.data() }; }); PAYSLIP.runs = m; schedule(); }, () => {});
+}
+const myPayslips = () => Object.values(PAYSLIP.runs).filter((r) => r.status === 'FINAL' && (r.rows || []).some((x) => x.e === S.me.id)).sort((a, b) => b.month.localeCompare(a.month));
+function myWorkspace() {
+  if (!S.me) return '';
+  ensurePayslips();
+  const T = today(), m = thisMonth(), sm = monthSummary(S.me, m), bals = balances(S.me, +T.slice(0, 4)).filter((b) => b.lt.quota || b.used);
+  const wfh = reqsOf('WFH_OD', S.me.id).filter((r) => r.status !== 'CANCELLED').sort((a, b) => (b.data.from || '').localeCompare(a.data.from || '')).slice(0, 4);
+  const chats = (typeof myChats === 'function' ? myChats() : []).filter((c) => c.last).sort((a, b) => b.last.at - a.last.at).slice(0, 4);
+  const slips = myPayslips().slice(0, 4);
+  const letters = reqsOf('DOCUMENT', S.me.id).sort((a, b) => b.created - a.created).slice(0, 3);
+  const kv = (l, v, c = '') => `<div><span>${l}</span><b class="${c}">${v}</b></div>`;
+  return `<h2 class="sec-h">My workspace</h2><div class="dgrid rd-my">
+    ${card(`My attendance · ${fmtM(m)}`, `<div class="kv rd-kv">${kv('Present', sm.present, 'ok')}${kv('Late', sm.late, sm.late ? 'warn' : '')}${kv('Absent', sm.absent, sm.absent ? 'bad' : '')}${kv('Leave', sm.leave + sm.lwp)}${kv('WFH / OD', sm.wfh + sm.od)}${kv('Half days', sm.half)}</div>
+      ${sm.missing ? `<p class="tiny" style="color:var(--warn);margin:8px 0 0">${sm.missing} day(s) with a missing check-out</p>` : ''}`,
+      { actions: `<button class="btn sm ghost" data-a="go" data-go="attendance:mine">History</button><button class="btn sm" data-a="new-req" data-t="CORRECTION">Correction</button>` })}
+    ${card('Leave balance', bals.length ? `<div class="kv rd-kv">${bals.map((b) => kv(esc(b.lt.code), b.lt.quota ? b.avail : `${b.used} used`, b.lt.quota && b.avail <= 0 ? 'bad' : '')).join('')}</div>${bals.some((b) => b.pending) ? `<p class="tiny muted" style="margin:8px 0 0">${bals.reduce((s, b) => s + b.pending, 0)} day(s) waiting for approval</p>` : ''}` : empty('No leave types set up yet.'),
+      { actions: `<button class="btn sm ghost" data-a="nav" data-v="leave">History</button><button class="btn sm pri" data-a="apply-leave">Apply</button>` })}
+    ${card('My WFH / official duty', wfh.length ? `<ul class="list">${wfh.map((r) => `<li data-a="req" data-id="${r.id}" style="cursor:pointer"><span class="grow small">${r.data.kind === 'OD' ? 'Official duty' : 'Work from home'} · ${fmtD(r.data.from)}${r.data.to && r.data.to !== r.data.from ? ' – ' + fmtD(r.data.to) : ''}</span>${pill(RSTAT, r.status)}</li>`).join('')}</ul>` : `<div class="body">${empty('No WFH or official-duty requests yet.')}</div>`,
+      { list: true, actions: `<button class="btn sm" data-a="new-req" data-t="WFH_OD">Request</button>` })}
+    ${card(`Chats${unreadCount() ? ` <span class="count">${unreadCount()} unread</span>` : ''}`, chats.length ? `<ul class="list">${chats.map((c) => `<li data-a="rd-chat" data-id="${esc(c.id)}" style="cursor:pointer"><span class="grow" style="min-width:0"><b class="small ${unreadIn(c) ? '' : 'muted'}">${esc(c.title)}</b><span class="tiny muted trunc" style="display:block">${c.last.by === S.me.id ? 'You: ' : ''}${esc(c.last.text || '')}</span></span><span class="tiny muted">${ymd(new Date(c.last.at)) === T ? hm(c.last.at) : fmtDs(ymd(new Date(c.last.at)))}</span></li>`).join('')}</ul>` : `<div class="body">${empty('No conversations yet.')}</div>`,
+      { list: true, actions: '<button class="btn sm ghost" data-a="nav" data-v="chats">Open chats</button>' })}
+    ${card('My documents', `<div class="body grid" style="gap:10px">
+        <div><b class="tiny">Payslips</b>${slips.length ? `<div class="row" style="gap:6px;flex-wrap:wrap;margin-top:4px">${slips.map((r) => `<button class="btn sm ghost" data-a="rd-slip" data-m="${esc(r.month)}">${esc(fmtM(r.month))}</button>`).join('')}</div>` : '<div class="tiny muted">None yet — payslips appear when HR finalises a month’s payroll.</div>'}</div>
+        <div><b class="tiny">Letters &amp; documents</b>${letters.length ? letters.map((r) => `<div class="row small" style="justify-content:space-between;margin-top:4px"><button class="btn sm ghost" data-a="req" data-id="${r.id}" style="padding:0 4px">${esc(r.title)}</button>${pill(RSTAT, r.status)}</div>`).join('') : '<div class="tiny muted">No document requests.</div>'}
+          <button class="btn sm" data-a="new-req" data-t="DOCUMENT" style="margin-top:6px">Request a letter</button></div>
+        <div><b class="tiny">Company policies</b><div><button class="btn sm ghost" data-a="nav" data-v="policies" style="padding:0 4px">Open policies</button></div></div>
+      </div>`, { list: true })}
+  </div>`;
+}
+function payslipModal(m) {
+  const run = PAYSLIP.runs[m], row = run?.rows?.find((x) => x.e === S.me.id);
+  if (!run || run.status !== 'FINAL' || !row) return `${mhead('Payslip')}<div class="body">${empty('This payslip isn’t available.')}</div><footer><button class="btn" data-a="close">Close</button></footer>`;
+  const money = (n) => (n == null ? '—' : `₹${Math.round(+n).toLocaleString('en-IN')}`);
+  const line = (l, v) => `<div class="row" style="justify-content:space-between"><span class="small">${l}</span><b class="small">${v}</b></div>`;
+  return `${mhead(`Payslip · ${esc(fmtM(m))}`, `${esc(S.me.name)} · ${esc(S.me.code || '')} · finalised ${fmtD(ymd(new Date(run.at)))}`)}
+  <div class="body grid" style="gap:12px">
+    <div class="grid" style="gap:4px"><h3 class="sec-l" style="margin:0">Attendance</h3>${line('Days counted', `${row.dc ?? '—'}${row.rq != null ? ` of ${row.rq}` : ''}`)}${line('Absent', row.a ?? 0)}${line('Paid leave', row.l ?? 0)}${line('Unpaid leave', row.u ?? 0)}${line('Work from home', row.w ?? 0)}${row.mp ? line('Missing check-outs', row.mp) : ''}</div>
+    <div class="grid" style="gap:4px"><h3 class="sec-l" style="margin:0">Pay</h3>${line('Monthly salary', money(row.s))}${line('Earned for days counted', money(row.b))}${row.sc ? line('Short hours', '− ' + money(row.sc)) : ''}${row.wd ? line('WFH rule', '− ' + money(row.wd)) : ''}${row.fi ? line('Fines', '− ' + money(row.fi)) : ''}
+      <div class="row" style="justify-content:space-between;border-top:1px solid var(--line);padding-top:6px;margin-top:4px"><b>Net pay</b><b>${money(row.n)}</b></div></div>
+    <p class="tiny muted" style="margin:0">From the payroll HR finalised for ${fmtM(m)}. Questions: raise a “Help from HR” request.</p>
+  </div><footer><button class="btn" data-a="close">Close</button><button class="btn" data-a="rd-slip-print">Print</button></footer>`;
+}
+
+/* ═════════════ HR dashboard (Admin and HR) ═════════════ */
+const EMP_STATUS = { ACTIVE: 'Active', PROBATION: 'Probation', ON_NOTICE: 'On notice', EXITED: 'Exited' };
+const pendingWith = (r) => r.status === 'PENDING' && curStep(r)?.by === S.me.id;
+function vHrDash() {
+  if (!isHR()) return shell(empty('The HR dashboard is for HR and administrators.'), 'HR dashboard');
+  const tab = ui('hrTab', 'people'), m = ui('hrMonth', thisMonth());
+  const tabs = [['people', 'Employees'], ['corr', 'Attendance corrections'], ['leave', 'Leave'], ['monthly', 'Monthly report'], ['wfh', 'WFH compliance'], ['payroll', 'Payroll inputs']];
+  const head = `<div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button class="tab" role="tab" aria-selected="${tab === k}" data-a="ui" data-k="hrTab" data-v="${k}">${l}</button>`).join('')}</div>`;
+  const monthPick = `<select class="i" id="hr-month" data-c="hrMonth" aria-label="Month" style="max-width:200px">${monthOpts(m)}</select>`;
+  let body = '';
+  if (tab === 'people') {
+    const q = ui('hrQ', '').trim().toLowerCase(), dept = ui('hrDept', ''), st = ui('hrSt', ''), des = ui('hrDes', '');
+    const all = S.emps.filter((e) => (!st ? e.active !== false && e.status !== 'EXITED' : st === 'EXITED' ? e.status === 'EXITED' || e.active === false : e.status === st && e.active !== false))
+      .filter((e) => (!dept || e.deptId === dept) && (!des || (e.designation || '') === des) && (!q || `${e.name} ${e.code || ''} ${e.email || ''}`.toLowerCase().includes(q)));
+    const designations = [...new Set(S.emps.map((e) => e.designation).filter(Boolean))].sort();
+    body = `<div class="filters rd-filters"><input class="i" id="hr-q" data-i="hrQ" placeholder="Search name, employee ID or email" value="${esc(ui('hrQ', ''))}" aria-label="Search">
+      <select class="i" id="hr-dept" data-c="hrDept" aria-label="Department">${deptOpts(dept, 'All departments')}</select>
+      <select class="i" id="hr-des" data-c="hrDes" aria-label="Designation">${opts(designations.map((d) => [d, d]), des, 'All designations')}</select>
+      <select class="i" id="hr-st" data-c="hrSt" aria-label="Status">${opts([['ACTIVE', 'Active'], ['PROBATION', 'Probation'], ['ON_NOTICE', 'On notice'], ['EXITED', 'Exited']], st, 'Current employees')}</select>
+      <button class="btn pri" data-a="emp-new">Add employee</button></div>
+      ${card(`Employees · ${all.length}`, dataTable('hrP', all, [
+        { k: 'name', label: 'Name', v: (e) => e.name, html: (e) => person(e.id, e.designation || '') },
+        { k: 'code', label: 'Employee ID', v: (e) => e.code || '' }, { k: 'dept', label: 'Department', v: (e) => deptOf(e.deptId)?.name || '' },
+        { k: 'mgr', label: 'Reports to', v: (e) => (e.managerId ? nameOf(e.managerId) : '') }, { k: 'role', label: 'Role', v: (e) => (ROLES.find((r) => r[0] === e.role) || [])[1] || e.role || '' },
+        { k: 'status', label: 'Status', v: (e) => EMP_STATUS[e.active === false ? 'EXITED' : e.status || 'ACTIVE'] || e.status }, { k: 'join', label: 'Joined', v: (e) => e.joining || '', html: (e) => (e.joining ? fmtD(e.joining) : '—') },
+        { k: 'acct', label: 'Account', v: (e) => (e.userId ? 'Linked' : 'Not created'), html: (e) => (e.userId ? '<span class="pill t-ok">Linked</span>' : '<span class="pill">Not created</span>') },
+      ], { name: 'Employees', click: (e) => `data-a="emp" data-id="${e.id}"`, empty: 'No employees match.' }), { list: true })}`;
+  }
+  if (tab === 'corr' || tab === 'leave') {
+    const type = tab === 'corr' ? 'CORRECTION' : 'LEAVE', show = ui('hrRq', 'pending');
+    const list = S.reqs.filter((r) => r.type === type && (show === 'pending' ? r.status === 'PENDING' : show === 'mine' ? pendingWith(r) : r.status !== 'PENDING') && (show !== 'decided' || (r.decided || r.created || 0) >= Date.now() - 90 * 864e5));
+    const cols = [
+      { k: 'code', label: 'Request', v: (r) => r.code, html: (r) => `<b class="small">${esc(r.code)}</b>${pendingWith(r) ? ' <span class="pill t-warn">Your decision</span>' : ''}` },
+      { k: 'emp', label: 'Employee', v: (r) => nameOf(r.empId), html: (r) => person(r.empId, deptOf(empById(r.empId)?.deptId)?.name || '') },
+      type === 'CORRECTION' ? { k: 'date', label: 'Date', v: (r) => r.data.date || '', html: (r) => `${fmtD(r.data.date)}<div class="tiny muted">In ${esc(r.data.inT || '—')} · Out ${esc(r.data.outT || '—')}</div>` }
+        : { k: 'date', label: 'Dates', v: (r) => r.data.from || '', html: (r) => `${fmtD(r.data.from)}${r.data.to !== r.data.from ? ' – ' + fmtD(r.data.to) : ''}<div class="tiny muted">${esc(r.data.lt || '')} · ${+r.data.days || 0} day(s)${r.data.half ? ' · half' : ''}</div>` },
+      { k: 'reason', label: 'Reason', v: (r) => r.data.reason || '', html: (r) => `<span class="small">${esc((r.data.reason || '').slice(0, 120))}</span>` },
+      { k: 'step', label: 'With', v: (r) => (r.status === 'PENDING' ? nameOf(curStep(r)?.by) : ''), html: (r) => (r.status === 'PENDING' ? `<span class="small">${esc(nameOf(curStep(r)?.by))}</span><div class="tiny muted">${esc(curStep(r)?.label || '')}</div>` : '—') },
+      { k: 'status', label: 'Status', v: (r) => r.status, html: (r) => pill(RSTAT, r.status) },
+      { k: 'raised', label: 'Raised', v: (r) => r.created || 0, html: (r) => `<span class="small">${fmtD(ymd(new Date(r.created)))}</span>` },
+    ];
+    body = `<div class="filters rd-filters">${opts ? `<select class="i" id="hr-rq" data-c="hrRq" aria-label="Show" style="max-width:260px">${opts([['pending', 'All pending'], ['mine', 'Waiting for my decision'], ['decided', 'Decided (last 90 days)']], show)}</select>` : ''}
+      ${tab === 'leave' ? '<button class="btn ghost" data-a="rd-settings" data-v="leave">Leave policy</button>' : ''}</div>
+      ${card(tab === 'corr' ? 'Attendance corrections' : 'Leave applications', dataTable('hr' + type, list, cols, { name: tab === 'corr' ? 'Attendance corrections' : 'Leave applications', click: (r) => `data-a="req" data-id="${r.id}"`, empty: 'Nothing here.' }), { list: true })}
+      <p class="tiny muted">Open a request to approve, reject or send it back — the approval chain and its audit trail are unchanged (every decision is recorded in the request and in the audit log).</p>
+      ${tab === 'leave' ? card(`Leave balances · ${today().slice(0, 4)}`, dataTable('hrBal', active(), [
+        { k: 'name', label: 'Employee', v: (e) => e.name },
+        { k: 'dept', label: 'Department', v: (e) => deptOf(e.deptId)?.name || '' },
+        ...cfg().leaveTypes.map((lt) => ({ k: 'lt' + lt.code, label: lt.code + ' left', num: true, v: (e) => { const b = balances(e).find((x) => x.lt.code === lt.code); return b ? (lt.quota ? b.avail : b.used) : 0; } })),
+      ], { name: 'Leave balances' }), { list: true }) : ''}`;
+  }
+  if (tab === 'monthly' || tab === 'payroll') {
+    const rows = active().map((e) => ({ e, s: monthSummary(e, m) })).filter((r) => r.s.days > 0);
+    const base = [{ k: 'name', label: 'Employee', v: (r) => r.e.name }, { k: 'code', label: 'ID', v: (r) => r.e.code || '' }, { k: 'dept', label: 'Department', v: (r) => deptOf(r.e.deptId)?.name || '' }];
+    const n = (k, label, f) => ({ k, label, num: true, v: f });
+    const cols = tab === 'monthly'
+      ? [...base, n('work', 'Working days', (r) => r.s.work), n('present', 'Present', (r) => r.s.present), n('late', 'Late', (r) => r.s.late), n('absent', 'Absent', (r) => r.s.absent), n('half', 'Half days', (r) => r.s.half), n('leave', 'Leave', (r) => r.s.leave), n('lwp', 'Unpaid leave', (r) => r.s.lwp), n('wfh', 'WFH', (r) => r.s.wfh), n('od', 'Official duty', (r) => r.s.od), n('miss', 'Missing check-out', (r) => r.s.missing)]
+      : [...base, n('work', 'Working days', (r) => r.s.work), n('present', 'Days present', (r) => r.s.present), n('leave', 'Paid leave', (r) => r.s.leave), n('lwp', 'Unpaid leave', (r) => r.s.lwp), n('half', 'Half days', (r) => r.s.half), n('absent', 'Absent', (r) => r.s.absent), n('wfh', 'WFH days', (r) => r.s.wfh + r.s.od), n('late', 'Late arrivals', (r) => r.s.late), n('pay', 'Payable days', (r) => r.s.payable)];
+    const tot = (k) => rows.reduce((a, r) => a + (r.s[k] || 0), 0);
+    body = `<div class="filters rd-filters">${monthPick}${tab === 'payroll' && canSalary() ? '<button class="btn ghost" data-a="go" data-go="attendance:salary">Open the salary sheet</button>' : ''}</div>
+      <div class="kstrip rd-kpis">${[['Working days (all)', tot('work')], ['Present', tot('present')], ['Absent', tot('absent')], ['Leave', tot('leave') + tot('lwp')], ['Late arrivals', tot('late')], ['WFH / OD', tot('wfh') + tot('od')]].map(([l, v]) => `<div class="kt" style="cursor:default"><span class="l">${l}</span><span class="v">${v}</span></div>`).join('')}</div>
+      ${card(`${tab === 'monthly' ? 'Monthly attendance' : 'Payroll inputs'} · ${fmtM(m)}${m === thisMonth() ? ' (so far)' : ''}`, dataTable('hr' + tab, rows, cols, { name: `${tab === 'monthly' ? 'Monthly attendance' : 'Payroll inputs'} ${m}`, click: (r) => `data-a="emp" data-id="${r.e.id}"`, empty: 'No attendance for this month.' }), { list: true })}
+      ${tab === 'payroll' ? '<p class="tiny muted">Inputs for payroll, not a salary calculation: payable days = days present + paid leave + ½ × half days (+ ½ when the other half is paid leave). The salary sheet applies the company’s pay rules and is only open to people with salary access.</p>' : '<p class="tiny muted">From check-ins, approved leave and approved WFH / official-duty requests. Weekly offs and holidays are excluded from working days.</p>'}`;
+  }
+  if (tab === 'wfh') {
+    const reqs = S.reqs.filter((r) => r.type === 'WFH_OD' && r.data.from <= monthEnd(m) && (r.data.to || r.data.from) >= m + '-01');
+    const byEmp = new Map();
+    for (const r of reqs) { const x = byEmp.get(r.empId) || { e: empById(r.empId), approved: 0, pending: 0, rejected: 0, days: 0, checkedIn: 0, located: 0 }; if (!x.e) continue; x[r.status === 'APPROVED' ? 'approved' : r.status === 'PENDING' ? 'pending' : 'rejected']++; byEmp.set(r.empId, x); }
+    for (const x of byEmp.values()) {
+      for (const d of eachDay(m + '-01', monthEnd(m) < today() ? monthEnd(m) : today())) {
+        const rem = remoteOn(x.e.id, d); if (!rem || weeklyOff(d) || holidayOn(d)) continue;
+        x.days++; if (punchesOn(x.e.id, d).length) x.checkedIn++; if (lastPing(locOf(x.e.id, d))) x.located++;
+      }
+    }
+    const rows = [...byEmp.values()];
+    const pct = (a, b) => (b ? Math.round((a / b) * 100) + '%' : '—');
+    body = `<div class="filters rd-filters">${monthPick}<button class="btn ghost" data-a="nav" data-v="wfhlive">Live WFH locations</button></div>
+      ${card(`WFH / official duty · ${fmtM(m)}`, dataTable('hrW', rows, [
+        { k: 'name', label: 'Employee', v: (x) => x.e.name, html: (x) => person(x.e.id, deptOf(x.e.deptId)?.name || '') },
+        { k: 'appr', label: 'Approved requests', num: true, v: (x) => x.approved }, { k: 'pend', label: 'Pending', num: true, v: (x) => x.pending }, { k: 'rej', label: 'Rejected / cancelled', num: true, v: (x) => x.rejected },
+        { k: 'days', label: 'Remote working days', num: true, v: (x) => x.days }, { k: 'ci', label: 'Checked in', num: true, v: (x) => x.checkedIn, html: (x) => `${x.checkedIn} <span class="tiny muted">(${pct(x.checkedIn, x.days)})</span>` },
+        { k: 'loc', label: 'Shared a location', num: true, v: (x) => x.located, html: (x) => `${x.located} <span class="tiny muted">(${pct(x.located, x.days)})</span>` },
+      ], { name: `WFH compliance ${m}`, empty: 'No WFH or official-duty requests this month.' }), { list: true })}
+      <p class="tiny muted">“Checked in” and “Shared a location” count remote working days with a check-in, and with at least one shared location (locations are kept for 40 days).</p>`;
+  }
+  return shell(`${head}${body}`, 'HR dashboard', 'Employees, attendance, leave and payroll inputs — company-wide');
+}
+
+/* ═════════════ Management dashboard (Admin and Directors; administration tabs for Admin only) ═════════════ */
+const isAdmin = () => S.me?.role === 'ADMIN';
+const canMgmtDash = () => ['ADMIN', 'DIRECTOR'].includes(S.me?.role);
+const AUD = { sub: false, list: [] };
+function ensureAudit() {
+  // the server sends the audit log to administrators only
+  if (AUD.sub || !S.db || !isAdmin()) return;
+  AUD.sub = true;
+  S.db.collection('audit').onSnapshot((q) => { AUD.list = docsOf(q).sort((a, b) => (b.at || 0) - (a.at || 0)); schedule(); }, () => {});
+}
+function deptStats(d, from, to) {
+  const ppl = active().filter((e) => e.deptId === d.id);
+  let work = 0, present = 0, late = 0, absent = 0, leave = 0, wfh = 0;
+  for (const e of ppl) for (const day of eachDay(from, to)) {
+    const s = dayStatus(e, day), c = s.code; if (!c || ['WO', 'H', 'PS', 'NI'].includes(c) || weeklyOff(day) || holidayOn(day)) continue;
+    work++; if (presentish(c)) present += c === 'HD' ? 0.5 : 1; if (c === 'L') late++; if (c === 'A') absent++; if (c === 'LV') leave++; if (remoteOn(e.id, day)) wfh++;
+  }
+  const tasks = S.tasks.filter((t) => t.deptId === d.id && t.status !== 'CANCELLED'), open = tasks.filter(openTask);
+  const done = tasks.filter((t) => t.status === 'DONE' && t.completedAt && ymd(new Date(t.completedAt)) >= from && ymd(new Date(t.completedAt)) <= to);
+  const onTime = done.filter((t) => ymd(new Date(t.completedAt)) <= t.due);
+  return { d, people: ppl.length, work, present, late, absent, leave, wfh, att: work ? Math.round((present / work) * 100) : null, open: open.length, overdue: open.filter((t) => overdue(t)).length, blocked: open.filter((t) => t.status === 'BLOCKED').length, done: done.length, onTime: done.length ? Math.round((onTime.length / done.length) * 100) : null, perHead: ppl.length ? round2(open.length / ppl.length) : 0 };
+}
+function periodRange(kind, val) {
+  if (kind === 'quarter') { const [y, q] = val.split('-Q').map(Number); const from = `${y}-${String((q - 1) * 3 + 1).padStart(2, '0')}-01`, to = monthEnd(`${y}-${String(q * 3).padStart(2, '0')}`); return [from, to < today() ? to : today()]; }
+  return [val + '-01', monthEnd(val) < today() ? monthEnd(val) : today()];
+}
+function quarterOpts(sel) { const out = []; let y = +today().slice(0, 4), q = Math.floor((+today().slice(5, 7) - 1) / 3) + 1; for (let i = 0; i < 6; i++) { out.push([`${y}-Q${q}`, `Q${q} ${y}`]); q--; if (!q) { q = 4; y--; } } return opts(out, sel); }
+function vMgmtDash() {
+  if (!canMgmtDash()) return shell(empty('The management dashboard is for administrators and directors.'), 'Management');
+  const admin = isAdmin(), tab = ui('mgTab', 'overview'), T = today();
+  const tabs = [['overview', 'Company overview'], ['depts', 'Departments'], ['reports', 'Business reports'], ...(admin ? [['users', 'Users & roles'], ['audit', 'Audit log'], ['config', 'Configuration']] : [])];
+  const head = `<div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button class="tab" role="tab" aria-selected="${tab === k}" data-a="ui" data-k="mgTab" data-v="${k}">${l}</button>`).join('')}</div>`;
+  let body = '';
+  if (tab === 'overview') {
+    const all = S.emps, act = active(), st = act.map((e) => ({ e, s: dayStatus(e, T), rem: remoteOn(e.id, T) }));
+    const c = (f) => st.filter(f).length;
+    const pend = S.reqs.filter((r) => r.status === 'PENDING'), open = S.tasks.filter((t) => openTask(t) && t.status !== 'CANCELLED');
+    const late = pend.filter((r) => { const s = curStep(r); return s?.at && Date.now() - s.at > (cfg().slaHours || 24) * 3600000; });
+    const kp = [['Employees', all.length, ''], ['Active', act.length, ''], ['Present today', c((x) => ['P', 'L', 'I'].includes(x.s.code) && !x.rem), 'ok'], ['WFH / OD today', c((x) => x.rem && !['LV', 'WO', 'H'].includes(x.s.code)), ''], ['On leave', c((x) => x.s.code === 'LV'), ''], ['Not checked in', c((x) => x.s.code === 'NI'), c((x) => x.s.code === 'NI') ? 'warn' : ''], ['Pending approvals', pend.length, pend.length ? 'warn' : ''], ['Past response time', late.length, late.length ? 'bad' : ''], ['Open tasks', open.length, ''], ['Overdue tasks', open.filter((t) => overdue(t)).length, open.some((t) => overdue(t)) ? 'bad' : '']];
+    const m0 = thisMonth(), ds = cfg().depts.map((d) => deptStats(d, m0 + '-01', T));
+    const bar = (v, max, cls = '') => `<div class="bar rd-bar"><span class="${cls}" style="width:${max ? Math.round((v / max) * 100) : 0}%"></span></div>`;
+    body = `<div class="kstrip rd-kpis">${kp.map(([l, v, cl]) => `<div class="kt" style="cursor:default"><span class="l">${l}</span><span class="v ${cl}">${v}</span></div>`).join('')}</div>
+      <div class="dgrid">
+        ${card(`Attendance this month by department`, ds.length ? `<div class="body grid" style="gap:10px">${ds.map((x) => `<div><div class="row small" style="justify-content:space-between"><span>${esc(x.d.name)}</span><b>${x.att == null ? '—' : x.att + '%'}</b></div>${bar(x.att || 0, 100)}</div>`).join('')}</div>` : empty('No departments yet.'), { list: true })}
+        ${card('Open work by department', ds.length ? `<div class="body grid" style="gap:10px">${ds.map((x) => `<div><div class="row small" style="justify-content:space-between"><span>${esc(x.d.name)}</span><span><b>${x.open}</b> open${x.overdue ? ` · <span style="color:var(--bad)">${x.overdue} overdue</span>` : ''}</span></div>${bar(x.open, Math.max(1, ...ds.map((y) => y.open)))}</div>`).join('')}</div>` : empty('No departments yet.'), { list: true })}
+        ${card(`Pending approvals · ${pend.length}`, pend.length ? `<ul class="list">${pend.sort((a, b) => a.created - b.created).slice(0, 6).map((r) => `<li data-a="req" data-id="${r.id}" style="cursor:pointer"><span class="grow small trunc">${esc(r.code)} · ${esc(RTYPE[r.type] || r.type)} · ${esc(nameOf(r.empId))}</span><span class="tiny muted">with ${esc(nameOf(curStep(r)?.by))}</span></li>`).join('')}</ul>` : `<div class="body">${empty('Nothing pending.')}</div>`, { list: true, actions: '<button class="btn sm ghost" data-a="nav" data-v="approvals">Approvals</button>' })}
+      </div>`;
+  }
+  if (tab === 'depts' || tab === 'reports') {
+    const kind = tab === 'reports' ? ui('mgKind', 'month') : 'month', val = tab === 'reports' ? ui(kind === 'quarter' ? 'mgQ' : 'mgM', kind === 'quarter' ? `${T.slice(0, 4)}-Q${Math.floor((+T.slice(5, 7) - 1) / 3) + 1}` : thisMonth()) : ui('mgDm', thisMonth());
+    const [from, to] = periodRange(kind, val);
+    const ds = cfg().depts.map((d) => deptStats(d, from, to));
+    const totals = ds.reduce((a, x) => { for (const k of ['people', 'work', 'present', 'late', 'absent', 'leave', 'wfh', 'open', 'overdue', 'blocked', 'done']) a[k] = (a[k] || 0) + x[k]; return a; }, {});
+    const pick = tab === 'depts' ? `<select class="i" id="mg-dm" data-c="mgDm" aria-label="Month" style="max-width:200px">${monthOpts(val)}</select>`
+      : `<select class="i" id="mg-kind" data-c="mgKind" aria-label="Period" style="max-width:160px">${opts([['month', 'Monthly'], ['quarter', 'Quarterly']], kind)}</select>${kind === 'quarter' ? `<select class="i" id="mg-q" data-c="mgQ" style="max-width:160px">${quarterOpts(val)}</select>` : `<select class="i" id="mg-m" data-c="mgM" style="max-width:200px">${monthOpts(val)}</select>`}`;
+    const n = (k, label, f) => ({ k, label, num: true, v: f });
+    const cols = [{ k: 'name', label: 'Department', v: (x) => x.d.name, html: (x) => `<b class="small">${esc(x.d.name)}</b><div class="tiny muted">${esc(x.d.headId ? nameOf(x.d.headId) : 'no head')}</div>` }, n('people', 'People', (x) => x.people),
+      n('att', 'Attendance %', (x) => x.att ?? -1), n('late', 'Late arrivals', (x) => x.late), n('absent', 'Absences', (x) => x.absent), n('leave', 'Leave days', (x) => x.leave), n('wfh', 'WFH / OD days', (x) => x.wfh),
+      n('open', 'Open tasks', (x) => x.open), n('overdue', 'Overdue', (x) => x.overdue), n('blocked', 'Blocked', (x) => x.blocked), n('done', 'Completed', (x) => x.done), n('ontime', 'On time %', (x) => x.onTime ?? -1), n('per', 'Open per person', (x) => x.perHead)];
+    for (const c of cols) if (['att', 'ontime'].includes(c.k)) c.html = (x) => { const v = c.v(x); return v < 0 ? '—' : v + '%'; };
+    body = `<div class="filters rd-filters">${pick}</div>
+      ${tab === 'reports' ? `<div class="kstrip rd-kpis">${[['People', totals.people || 0], ['Attendance', totals.work ? Math.round((totals.present / totals.work) * 100) + '%' : '—'], ['Late arrivals', totals.late || 0], ['Absences', totals.absent || 0], ['Leave days', totals.leave || 0], ['WFH / OD days', totals.wfh || 0], ['Tasks completed', totals.done || 0], ['Overdue now', totals.overdue || 0]].map(([l, v]) => `<div class="kt" style="cursor:default"><span class="l">${l}</span><span class="v">${v}</span></div>`).join('')}</div>` : ''}
+      ${card(`${tab === 'depts' ? 'Department comparison' : 'Operational report'} · ${fmtD(from)} – ${fmtD(to)}`, dataTable('mg' + tab, ds, cols, { name: `${tab === 'depts' ? 'Department comparison' : 'Business report'} ${val}`, empty: 'No departments yet.' }), { list: true })}
+      <p class="tiny muted">Attendance % = days present (half days count ½) ÷ working days. Completed and on-time use each task’s completion date; open and overdue are as of now. Employees without a department aren’t in any row.</p>`;
+  }
+  if (tab === 'users' && admin) {
+    const q = ui('mgQu', '').trim().toLowerCase(), role = ui('mgRole', '');
+    const list = S.emps.filter((e) => (!role || e.role === role) && (!q || `${e.name} ${e.code || ''} ${e.email || ''}`.toLowerCase().includes(q)));
+    body = `<div class="filters rd-filters"><input class="i" id="mg-qu" data-i="mgQu" placeholder="Search name, ID or email" value="${esc(ui('mgQu', ''))}"><select class="i" id="mg-role" data-c="mgRole">${opts(ROLES, role, 'All roles')}</select>
+      <button class="btn" data-a="rd-settings" data-v="access">Window access by role</button><button class="btn" data-a="rd-settings" data-v="depts">Departments &amp; heads</button><button class="btn pri" data-a="emp-new">Add employee</button></div>
+      ${card(`Users & roles · ${list.length}`, dataTable('mgU', list, [
+        { k: 'name', label: 'Name', v: (e) => e.name, html: (e) => person(e.id, e.email || '') }, { k: 'role', label: 'Role', v: (e) => e.role, html: (e) => `<span class="pill ${e.role === 'ADMIN' ? 't-bad' : ['HR', 'DIRECTOR'].includes(e.role) ? 't-warn' : e.role === 'MANAGER' ? 't-info' : ''}">${esc((ROLES.find((r) => r[0] === e.role) || [])[1] || e.role)}</span>` },
+        { k: 'dept', label: 'Department', v: (e) => deptOf(e.deptId)?.name || '' }, { k: 'mgr', label: 'Reports to', v: (e) => (e.managerId ? nameOf(e.managerId) : '') },
+        { k: 'head', label: 'Heads', v: (e) => cfg().depts.filter((d) => d.headId === e.id).map((d) => d.name).join(', ') },
+        { k: 'acct', label: 'Account', v: (e) => (e.userId ? 'Linked' : 'Not created') }, { k: 'st', label: 'Status', v: (e) => EMP_STATUS[e.active === false ? 'EXITED' : e.status || 'ACTIVE'] || e.status },
+      ], { name: 'Users and roles', click: (e) => `data-a="emp" data-id="${e.id}"` }), { list: true })}
+      <p class="tiny muted">Change someone’s role, department or manager from their record (HR and administrators). Every change is recorded in the audit log by the server. Window access by role is an administrator setting.</p>`;
+  }
+  if (tab === 'audit' && admin) {
+    ensureAudit();
+    const act = ui('mgAct', ''), who = ui('mgWho', ''), from = ui('mgFrom', ''), to = ui('mgTo', ''), q = ui('mgAq', '').trim().toLowerCase();
+    const acts = [...new Set(AUD.list.map((a) => a.action).filter(Boolean))].sort();
+    const list = AUD.list.filter((a) => (!act || a.action === act) && (!who || a.by === who) && (!from || ymd(new Date(a.at)) >= from) && (!to || ymd(new Date(a.at)) <= to) && (!q || JSON.stringify(a.detail || {}).toLowerCase().includes(q)));
+    const detail = (a) => Object.entries(a.detail || {}).map(([k, v]) => `${k}: ${k === 'emp' ? nameOf(v) : typeof v === 'object' ? JSON.stringify(v) : v}`).join(' · ');
+    body = `<div class="filters rd-filters"><select class="i" id="mg-act" data-c="mgAct" aria-label="Action">${opts(acts.map((x) => [x, x.replace(/_/g, ' ').toLowerCase()]), act, 'All actions')}</select>
+      <select class="i" id="mg-who" data-c="mgWho" aria-label="By">${peopleOpts(who, 'Anyone')}</select>
+      <input type="date" class="i" id="mg-from" data-c="mgFrom" value="${from}" aria-label="From"><input type="date" class="i" id="mg-to" data-c="mgTo" value="${to}" aria-label="To">
+      <input class="i" id="mg-aq" data-i="mgAq" placeholder="Search details" value="${esc(ui('mgAq', ''))}"></div>
+      ${card(`Audit log · ${list.length}`, AUD.sub && !AUD.list.length ? `<div class="body muted small">Loading…</div>` : dataTable('mgA', list, [
+        { k: 'at', label: 'When', v: (a) => a.at || 0, html: (a) => `<span class="small">${fmtDT(a.at)}</span>` }, { k: 'by', label: 'By', v: (a) => (a.by ? nameOf(a.by) : 'System') },
+        { k: 'action', label: 'Action', v: (a) => a.action || '', html: (a) => `<span class="pill">${esc((a.action || '').replace(/_/g, ' ').toLowerCase())}</span>` }, { k: 'detail', label: 'Details', v: (a) => detail(a), html: (a) => `<span class="small">${esc(detail(a)).slice(0, 300)}</span>` },
+      ], { name: 'Audit log', pageSize: 50, empty: 'No entries match.' }), { list: true })}
+      <p class="tiny muted">Recorded by the server for approvals, attendance changed by someone other than the employee, and role / department / manager / status changes; recorded by the app for settings, leave policy, payroll, salary, fines, claims and passwords. Only administrators can read it, and nobody can change or delete it.</p>`;
+  }
+  if (tab === 'config' && admin) {
+    const C = cfg();
+    const item = (k, l, d) => `<li data-a="rd-settings" data-v="${k}" style="cursor:pointer"><span class="grow"><b class="small">${l}</b><span class="tiny muted" style="display:block">${d}</span></span><span class="tiny muted">Open ›</span></li>`;
+    body = card('Configuration', `<ul class="list">${item('depts', 'Departments & heads', `${C.depts.length} department(s)`)}${item('calendar', 'Shift, weekly off & holidays', `Shift ${esc(C.shift.start)}–${esc(C.shift.end)} · ${C.holidays.length} holiday(s)`)}${item('leave', 'Leave policy', `${C.leaveTypes.length} leave type(s)`)}${item('general', 'Attendance & approvals', `Source: ${C.attSource === 'device' ? 'machine import' : 'web check-in'} · response time ${+C.slaHours || 24} h`)}${item('ann', 'Announcements', `${(C.announcements || []).length} posted`)}${item('access', 'Window access by role', 'Who sees which part of the app')}</ul>`, { list: true });
+  }
+  return shell(`${head}${body}`, 'Management', admin ? 'Company overview, departments, reports and administration' : 'Company overview, departments and reports');
+}
+
+async function rdAction(a, el) {
+  const t = el.dataset.t;
+  switch (a) {
+    case 'rd-sort': { const k = el.dataset.k; if (ui(t + 'Sort', '') === k) S.ui[t + 'Dir'] = ui(t + 'Dir', 'asc') === 'asc' ? 'desc' : 'asc'; else { S.ui[t + 'Sort'] = k; S.ui[t + 'Dir'] = 'asc'; } S.ui[t + 'Page'] = 0; return schedule(); }
+    case 'rd-page': S.ui[t + 'Page'] = Math.max(0, +el.dataset.p || 0); return schedule();
+    case 'rd-export': { const x = TBL[t]; if (!x) return; return exportXlsx(x.name, x.cols.map((c) => c.label), x.rows.map((r) => x.cols.map((c) => c.v(r) ?? ''))); }
+    case 'rd-chat': S.ui.chat = el.dataset.id; S.ui.chTab = 'msgs'; return setView('chats');
+    case 'rd-slip': return openModal(() => payslipModal(el.dataset.m));
+    case 'rd-slip-print': return window.print();
+    case 'rd-settings': S.ui.sTab = el.dataset.v; return setView('settings');
+  }
+}
+// filters change what's on the first page: go back to it
+document.addEventListener('change', (ev) => { const k = ev.target?.dataset?.c; if (k && /^(hr|mg)/.test(k)) for (const id of Object.keys(TBL)) S.ui[id + 'Page'] = 0; });
+document.addEventListener('input', (ev) => { const k = ev.target?.dataset?.i; if (k && /^(hr|mg)/.test(k)) for (const id of Object.keys(TBL)) S.ui[id + 'Page'] = 0; });
+</script>
+<style>
+.rd-filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}.rd-filters .i{flex:1 1 170px;min-width:0}.rd-filters .btn{flex:none}
+.rd-kpis{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
+.rd-t td{vertical-align:top}
+.th-sort{border:0;background:none;padding:0;font:inherit;color:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer;text-align:inherit}
+.rd-pager{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 12px;border-top:1px solid var(--line)}
+.rd-kv{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.rd-kv>div{background:var(--sunk);border-radius:8px;padding:6px 8px}.rd-kv span{display:block;font-size:.7rem;color:var(--muted)}.rd-kv b{font-size:1.1rem}
+.rd-kv b.ok{color:var(--ok)}.rd-kv b.warn{color:var(--warn)}.rd-kv b.bad{color:var(--bad)}
+.rd-bar{height:8px}
+@media print{body *{visibility:hidden}.modal,.modal *{visibility:visible}.modal{position:absolute;left:0;top:0;box-shadow:none}.modal footer{display:none}}
 </style>
 
 <script>
 /* ═════════════ Render loop ═════════════ */
-const VIEW_FN = { dashboard: vDashboard, policies: vPolicies, chats: vChats2, attendance: vAttendance, wfhlive: vWfhLive, leave: vLeave, tasks: vTasks, worklog: vWorklog, approvals: vApprovals, claims: vClaims, complaints: vComplaints, deptdash: vDeptDash, departments: vDepartments, people: vPeople, reports: vReports, settings: vSettings };
+const VIEW_FN = { dashboard: vDashboard, policies: vPolicies, chats: vChats2, attendance: vAttendance, wfhlive: vWfhLive, leave: vLeave, tasks: vTasks, worklog: vWorklog, approvals: vApprovals, claims: vClaims, complaints: vComplaints, deptdash: vDeptDash, hrdash: vHrDash, mgmtdash: vMgmtDash, departments: vDepartments, people: vPeople, reports: vReports, settings: vSettings };
 let raf = 0, viewChanged = true;
 function schedule() { if (!raf) raf = requestAnimationFrame(() => { raf = 0; render(); }); }
 function morph(root, html, fresh = false) {
@@ -4833,7 +5301,7 @@ async function onAction(a, el, ev) {
     case 'export-tasks': return exportXlsx('Tasks', ['Code', 'Title', 'Assignee', 'Assigned by', 'Priority', 'Status', 'Overdue', 'Start', 'Due', 'Project', 'Hours', 'Completed'], S.tasks.filter((t) => isMgmt() || canSee(t.assigneeId) || t.assignerId === S.me.id).sort(taskSort).map((t) => [t.code, t.title, nameOf(t.assigneeId), nameOf(t.assignerId), t.priority, TSTAT[effStatus(t)][0], overdue(t) ? 'Yes' : '', t.start, t.due, t.project || '', t.hours || 0, t.completedAt ? fmtDT(t.completedAt) : '']));
     case 'export-people': return exportXlsx('Employees', ['Code', 'Name', 'Email', 'Phone', 'Department', 'Designation', 'Reports to', 'Role', 'Status', 'Joining', 'Biometric ID'], S.emps.filter((e) => isMgmt() || canSee(e.id)).map((e) => [e.code, e.name, e.email || '', e.phone || '', deptOf(e.deptId)?.name || '', e.designation || '', e.managerId ? nameOf(e.managerId) : '', e.role, e.status || 'ACTIVE', e.joining || '', e.bioId || '']));
     case 'export-att-day': { const d = ui('attDate', today()); return exportXlsx(`Attendance ${d}`, ['Code', 'Name', 'Department', 'Status', 'In', 'Out', 'Worked (h)', 'Late (min)', 'Location', 'Notes'], scope().map(empById).filter(Boolean).map((e) => { const s = dayStatus(e, d); return [e.code, e.name, deptOf(e.deptId)?.name || '', STATUS[s.code]?.[0] || '', hm(s.inT), hm(s.outT), round2(s.work / 60), s.lateMin || '', locText(e.id, d), s.note]; })); }
-    default: if (a === 'cmdk-open') return openCmdk(); if (a === 'cmdk-go') return cmdkRun(cmdkItems()[+el.dataset.i || 0]); if (a.startsWith('pol-')) return polAction(a, el, ev); if (a.startsWith('dd-')) return ddAction(a, el, ev); if (a.startsWith('cmp-')) return cmpAction(a, el, ev); if (a.startsWith('chat-') || a.startsWith('cmdk-')) return chatAction2(a, el, ev); if (a.startsWith('loc-')) return locAction(a, el, ev); if (a.startsWith('pay-')) return payAction(a, el, ev); if (a.startsWith('claim-') || a.startsWith('cl-')) return claimAction(a, el, ev);
+    default: if (a === 'cmdk-open') return openCmdk(); if (a === 'cmdk-go') return cmdkRun(cmdkItems()[+el.dataset.i || 0]); if (a.startsWith('pol-')) return polAction(a, el, ev); if (a.startsWith('dd-')) return ddAction(a, el, ev); if (a.startsWith('rd-')) return rdAction(a, el, ev); if (a.startsWith('cmp-')) return cmpAction(a, el, ev); if (a.startsWith('chat-') || a.startsWith('cmdk-')) return chatAction2(a, el, ev); if (a.startsWith('loc-')) return locAction(a, el, ev); if (a.startsWith('pay-')) return payAction(a, el, ev); if (a.startsWith('claim-') || a.startsWith('cl-')) return claimAction(a, el, ev);
       if (a === 'acct') { S.ui.moreOpen = ''; return openModal(accountModal); }
       if (a === 'acct-signout') { await stopLive(true, true).catch(() => {}); return signOut(); }
       if (a === 'acct-reset') { const e = empById(id); return confirmBox(`Reset ${e.name}’s password?`, 'They will be signed out and asked to create a new password the next time they open OfficeHub.', async () => { if (!e.userId) fail('This employee has no account yet.'); if (S.canEdit === false) fail('You need Editor access to the app to reset passwords.'); await S.db.doc(`auth/${e.userId}`).delete(); await audit('PASSWORD_RESET', { emp: e.id }); await notify([e.id], { title: 'Your OfficeHub password was reset', body: `Reset by ${S.me.name}. Open OfficeHub to create a new one.` }); }, { danger: true }); }
@@ -4890,7 +5358,7 @@ async function onSubmit(f, form, fd, submitter) {
       const group = who.length > 1 ? newId() : null;
       let first = null, codes = [...S.tasks];
       for (const a of who) {
-        const tid = newId(), code = nextCode('TSK', codes);
+        const tid = newId(), code = await serverCode('TSK', codes);
         codes.push({ code });
         await put(`task/${tid}`, { ...base, code, assigneeId: a, assignerId: S.me.id, deptId: base.deptId || empById(a)?.deptId || null, status: 'TODO', parentId: S.ui.parentId || null, group, checklist: lines.map((x) => ({ t: x, d: false })), comments: [], created: Date.now(), history: [{ at: Date.now(), by: S.me.id, a: `Created and assigned to ${nameOf(a)}` }] });
         if (a !== S.me.id) await notify([a], { title: `New task: ${title}`, body: `${code} · ${PRIO[base.priority][0]} · due ${fmtD(due)}`, go: { view: 'tasks', task: tid } });
