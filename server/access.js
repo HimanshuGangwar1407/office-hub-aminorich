@@ -8,12 +8,15 @@
 //    employee's locations; non-HR users may only change their own preferences and usual WFH location
 //    (and Admin / HR / Manager accounts may reset someone's usual WFH location).
 //  - notifications: only the recipient reads or changes them.  mail log: HR, and each person their own.
+//  - work records (attendance, work logs, tasks, requests), private employee fields, payroll and the audit log:
+//    see server/people-rules.js — the person, their managers, the people a record names, and management.
 //  - files (blob/*): readable when you may read a chat message or location record that uses the file;
 //    changed or deleted only by the uploader, a group admin deleting the group's files, or HR.
 import { seesAllLocations, locVisible } from './loc-rules.js';
 import { isGroupAdmin } from './chat-rules.js';
 import { canReadComplaint, isComplaintStaffCtx } from './complaints.js';
 import { isPolicyManager, policyVisible } from './policy.js';
+import { peopleAccess, peopleReadable, shapeEmp, shapePayroll, shapeReq } from './people-rules.js';
 
 const MGMT = ['ADMIN', 'HR', 'DIRECTOR'];
 const SELF_EDITABLE = new Set(['prefs', 'wfhLoc']);
@@ -61,8 +64,12 @@ export function accessFor(s, ctx) {
   // reloads its copy, so policies it may no longer see are dropped
   const policyMgr = active && isPolicyManager(s, ctx);
   const visiblePolicies = [...ctx.policies.keys()].filter((id) => policyVisible(ctx.policies.get(id), s, ctx, policyMgr)).sort();
-  const sig = `${all ? 'all' : 'own'}.c${hash([...new Set(shared)].sort().join(','))}.k${complaintStaff ? 1 : 0}${s?.admin ? 'a' : ''}.p${hash(visiblePolicies.join(','))}`;
-  return { s, ctx, active, all, mgmt, chatOk, seesEmpLoc, complaintStaff, policyMgr, sig };
+  // whose work records this session may see; when that changes (a new report, a new department head), the browser
+  // reloads its copy so it gets the older records it may now see, and drops the ones it may no longer see
+  const P = peopleAccess(s, ctx);
+  const ppl = `${P.mgmt ? 'M' : 't' + hash([...P.team].sort().join(',')) + '.h' + hash([...P.headOf].sort().join(','))}${P.accounts ? 'A' : ''}${P.salary ? 'S' : ''}`;
+  const sig = `${all ? 'all' : 'own'}.c${hash([...new Set(shared)].sort().join(','))}.k${complaintStaff ? 1 : 0}${s?.admin ? 'a' : ''}.p${hash(visiblePolicies.join(','))}.w${ppl}`;
+  return { s, ctx, active, all, mgmt, chatOk, seesEmpLoc, complaintStaff, policyMgr, P, sig };
 }
 
 /** Can this record be sent to the session? `data` is null for deleted records. (Files are checked separately.) */
@@ -72,7 +79,8 @@ export function canReadDoc(path, data, A) {
   if (!A.active) return false;
   if (c === 'auth') return false;
   if (c === 'data') return a === 'users' && b === s.uid;
-  if (c === 'pay' || c === 'payroll' || c === 'fines') return !!s.salary;
+  if (c === 'payroll') return !!s.salary || !data || shapePayroll(data, s, A.P) !== undefined; // everyone else: their own payslip
+  if (c === 'pay' || c === 'fines') return !!s.salary;
   if (c === 'loc') return locVisible(path, s);
   if (c === 'chat') return A.chatOk(a);
   if (c === 'ntf') return !data || data.to === s.empId;
@@ -81,16 +89,22 @@ export function canReadDoc(path, data, A) {
   if (c === 'complaint' || c === 'complaintsecret' || c === 'complaintfile') return canReadComplaint(path, data, s, A.complaintStaff);
   if (c === 'policy') return policyVisible(data, s, A.ctx, A.policyMgr);
   if (c === 'policyfile') return false; // read only through a policy the reader may see (app.js)
+  const pr = peopleReadable(path, data, s, A.P, A.all);
+  if (pr !== undefined) return pr;
   return true;
 }
 
 /** The version of a readable record this session gets: the usual WFH location only goes to people who may see it. */
 export function shapeDoc(path, data, A) {
-  if (!data || !path.startsWith('emp/') || data.wfhLoc == null) return data;
+  if (!data) return data;
+  if (path.startsWith('payroll/')) return shapePayroll(data, A.s, A.P) ?? null;
+  if (path.startsWith('req/')) return shapeReq(data, A.s, A.P);
+  if (!path.startsWith('emp/')) return data;
   const id = path.slice(4);
-  if (id.includes('/') || A.seesEmpLoc(id)) return data;
-  const { wfhLoc, ...rest } = data;
-  return rest;
+  if (id.includes('/')) return data;
+  let out = shapeEmp(id, data, A.P); // private fields: the person, their managers, management and payroll only
+  if (out.wfhLoc != null && !A.seesEmpLoc(id)) { const { wfhLoc, ...rest } = out; out = rest; }
+  return out;
 }
 
 const changedKeys = (next, old) => [...new Set([...Object.keys(old || {}), ...Object.keys(next || {})])].filter((k) => JSON.stringify(next?.[k] ?? null) !== JSON.stringify(old?.[k] ?? null));

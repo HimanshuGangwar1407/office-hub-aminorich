@@ -60,9 +60,9 @@ async function identify() {
 async function createRequest(type, title, data, { amount = null, ctx = {}, empId } = {}) {
   const emp = empById(empId || S.me.id);
   const chain = chainFor(type, emp, { ...ctx, amount });
-  const now = Date.now();
+  const now = Date.now(), code = await serverCode('REQ', S.reqs);
   const r = {
-    code: nextCode('REQ', S.reqs), type, empId: emp.id, raisedBy: S.me.id, title, data, amount, status: 'PENDING', created: now,
+    code, type, empId: emp.id, raisedBy: S.me.id, title, data, amount, status: 'PENDING', created: now,
     steps: chain.map((s, i) => ({ ...s, status: i ? 'WAITING' : 'PENDING', at: i ? null : now })),
   };
   const id = newId();
@@ -150,7 +150,7 @@ async function escalate(r) {
   const s = curStep(r);
   if (!s) return;
   const boss = empById(s.by)?.managerId || firstRole('DIRECTOR', s.by);
-  await put(`req/${r.id}`, { ...strip(r), steps: r.steps.map((x) => (x === s ? { ...x, escalated: Date.now() } : x)) });
+  await put(`req/${r.id}`, { ...strip(r), steps: r.steps.map((x) => (x === s ? { ...x, escalated: Date.now() } : x)), watchers: [...new Set([...(r.watchers || []), boss].filter(Boolean))] });
   await notify([s.by], { title: `Reminder: ${r.code} is waiting for you`, body: r.title, go: { view: 'approvals', req: r.id } });
   if (boss) await notify([boss], { title: `Escalated: ${r.code} pending with ${nameOf(s.by)}`, body: `${r.title} — past the ${cfg().slaHours} h response time`, go: { view: 'approvals', req: r.id } });
 }
@@ -205,6 +205,9 @@ async function mentionNotify(text, title, go) {
   if (!handles.length) return;
   const ids = active().filter((e) => handles.some((h) => e.name.toLowerCase().split(/\s+/)[0] === h || (e.code || '').toLowerCase() === h)).map((e) => e.id);
   const deptHeads = cfg().depts.filter((d) => handles.includes(d.code.toLowerCase())).map((d) => d.headId);
+  const who = [...new Set([...ids, ...deptHeads].filter((x) => x && x !== S.me?.id))];
+  const rec = go?.task ? ['task', S.tasks.find((t) => t.id === go.task)] : go?.req ? ['req', S.reqs.find((r) => r.id === go.req)] : null;
+  if (rec?.[1] && who.some((x) => !(rec[1].watchers || []).includes(x))) await patch(`${rec[0]}/${rec[1].id}`, { watchers: [...new Set([...(rec[1].watchers || []), ...who])] }).catch(() => {});
   await notify([...ids, ...deptHeads], { title: `You were mentioned: ${title}`, body: text.slice(0, 200), go });
 }
 
@@ -214,7 +217,8 @@ async function runRecurring() {
   if (recurringRan || S.readonly) return;
   recurringRan = true;
   const T = today(), dom = +T.slice(8), codes = S.tasks.slice();
-  for (const tp of S.tpls.filter((x) => x.active !== false && (x.lastGen || '') < T)) {
+  const mayRun = (tp) => tp.assigneeId === S.me?.id || tp.createdBy === S.me?.id || isMgmt() || myTeam().includes(tp.assigneeId);
+  for (const tp of S.tpls.filter((x) => x.active !== false && (x.lastGen || '') < T && mayRun(x))) {
     const due = tp.freq === 'DAILY' ? workingDay(T) : tp.freq === 'WEEKLY' ? dow(T) === +tp.dow : dom === +tp.dom;
     if (!due) continue;
     try {
@@ -223,15 +227,15 @@ async function runRecurring() {
       if (!lease.acquired) continue;
       const fresh = await ref.get();
       if (!fresh.exists || (fresh.data().lastGen || '') >= T) continue;
-      const id = newId();
+      const id = newId(), code = await serverCode('TSK', codes);
       await put(`task/${id}`, {
-        code: nextCode('TSK', codes), title: tp.title, desc: tp.desc || '', assigneeId: tp.assigneeId, assignerId: tp.createdBy, reviewerId: tp.needsReview ? tp.createdBy : null,
+        code, title: tp.title, desc: tp.desc || '', assigneeId: tp.assigneeId, assignerId: tp.createdBy, reviewerId: tp.needsReview ? tp.createdBy : null,
         needsReview: !!tp.needsReview, deptId: empById(tp.assigneeId)?.deptId || null, project: tp.project || 'Recurring', priority: tp.priority || 'MEDIUM', status: 'TODO',
         start: T, due: addDays(T, +tp.dueIn || 0), checklist: (tp.checklist || []).map((x) => ({ t: x, d: false })), comments: [], created: Date.now(), tplId: tp.id,
         history: [{ at: Date.now(), by: null, a: 'Created from recurring template' }],
       });
       await patch(`tpl/${tp.id}`, { lastGen: T });
-      codes.push({ code: nextCode('TSK', codes) });
+      codes.push({ code });
     } catch (e) { console.warn('recurring', e); }
   }
 }

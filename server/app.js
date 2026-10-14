@@ -4,6 +4,7 @@ import { sessionFrom, hashPassword, checkPassword, passwordProblem, newUid, make
 import { chatWriteProblem, clearedChatsProblem } from './chat-rules.js';
 import { locWriteProblem, LIVE_STOPPED, LIVE_EXPIRED } from './loc-rules.js';
 import { buildCtx, accessFor, canReadDoc, shapeDoc, empWriteProblem, chatAccessProblem, ntfWriteProblem, mailWriteProblem, blobReadable, blobWriteProblem, refUsesFile } from './access.js';
+import { peopleWriteProblem, auditEntry } from './people-rules.js';
 import { isAssignableCtx, complaintWriteProblem, buildComplaint } from './complaints.js';
 import { policyWriteProblem, policyFileWriteProblem, policyVisible, isPolicyManager } from './policy.js';
 
@@ -60,6 +61,12 @@ async function checkWrite(op, path, data, old, s, A) {
   const no = (m) => fail(403, 'permission_denied', m || 'You don’t have permission to change this.');
   if (!s.active) no('Your account is not active. Ask HR.');
   if (c === 'auth') no();
+  if (['att', 'wlog', 'task', 'req', 'audit', 'seq'].includes(c)) {
+    const X = {};
+    if (c === 'req' && !old && ['REVIEW', 'EXTENSION'].includes(data?.type) && typeof data?.data?.taskId === 'string') X.task = (await getDoc(`task/${data.data.taskId}`))?.data || null;
+    if (c === 'req' && old?.type === 'LEAVE') X.cancelApprovers = (await q(`SELECT data FROM docs WHERE parent = 'req' AND NOT deleted AND data->'data'->>'cancelOf' = $1 AND data->>'status' = 'APPROVED'`, [a])).rows.flatMap((r) => (r.data?.steps || []).map((x) => x?.by)).filter(Boolean);
+    const bad = peopleWriteProblem(op, path, data, old, s, A.P, X); if (bad) no(bad); return;
+  }
   if (c === 'loc') { const bad = locWriteProblem(op, path, data, old, s); if (bad === LIVE_STOPPED) fail(409, 'live_stopped', bad); if (bad === LIVE_EXPIRED) fail(409, 'live_expired', bad); if (bad) no(bad); return; }
   if (c === 'chat') { const bad = chatAccessProblem(op, path, data, old, A); if (bad) no(bad); return; }
   if (c === 'ntf') { const bad = ntfWriteProblem(op, data, old, s); if (bad) no(bad); return; }
@@ -294,7 +301,23 @@ const routes = {
     if (chatBad) fail(403, 'permission_denied', chatBad);
     const v = await writeDoc(getPool(), op, path, op === 'delete' ? null : data);
     if (op !== 'delete') await mailIfQueued(path, op === 'update' ? { ...(old || {}), ...data } : data);
+    // sensitive changes are audited by the server itself (attendance edited by others, request decisions, role changes)
+    const entry = auditEntry(op, path, data, old, s);
+    if (entry) await addDoc(getPool(), 'audit', entry).catch((e) => console.error('audit', e));
     return { v };
+  },
+  // Request and task numbers (REQ-0001, TSK-0001) come from here: browsers only see their own records, so they can't
+  // work out the next free number themselves. Never below the highest number already used.
+  'POST seq': async (req) => {
+    const s = await needSession(req);
+    if (!s.active) fail(403, 'revoked', 'Your account is not active.');
+    const SEQ = { REQ: 'req', TSK: 'task' }, name = String(req.body?.name || '');
+    if (!SEQ[name]) fail(400, 'invalid_argument', 'Unknown sequence.');
+    const used = Number((await q(`SELECT COALESCE(max(split_part(data->>'code', '-', 2)::int), 0) AS n FROM docs WHERE parent = $1 AND data->>'code' ~ $2`, [SEQ[name], `^${name}-[0-9]{1,9}$`])).rows[0]?.n) || 0;
+    const r = await q(`INSERT INTO docs (path, parent, data, v, deleted, at) VALUES ($1, 'seq', jsonb_build_object('n', $2::int + 1), nextval('docs_v'), false, now())
+      ON CONFLICT (path) DO UPDATE SET data = jsonb_build_object('n', GREATEST((docs.data->>'n')::int, $2::int) + 1), v = nextval('docs_v'), at = now() RETURNING (data->>'n')::int AS n`, [`seq/${name}`, used]);
+    const n = Number(r.rows[0].n);
+    return { n, code: `${name}-${String(n).padStart(4, '0')}` };
   },
   'POST lease': async (req) => {
     const s = await needSession(req);

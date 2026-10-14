@@ -121,11 +121,13 @@ function vDepartments() {
   const T = today(), tab = ui('drTab', 'incoming'), mgmt = isMgmt();
   const ppl = active();
   const cards = cfg().depts.map((d) => {
-    const m = ppl.filter((e) => e.deptId === d.id), st = m.map((e) => dayStatus(e, T).code);
-    const open = S.tasks.filter((t) => t.deptId === d.id && openTask(t)), dash = ddDepts().some((x) => x.id === d.id);
+    // figures only for departments this user may see (management, the department's head); others show headcount only
+    const full = mgmt || d.headId === S.me.id;
+    const m = ppl.filter((e) => e.deptId === d.id), st = full ? m.map((e) => dayStatus(e, T).code) : [];
+    const open = full ? S.tasks.filter((t) => t.deptId === d.id && openTask(t)) : [], dash = ddDepts().some((x) => x.id === d.id);
     const inc = S.dreqs.filter((r) => r.toDept === d.id && !['RESOLVED', 'CLOSED'].includes(r.status));
     return `<section class="card"><div class="body"><div class="row" style="justify-content:space-between"><div><h2>${esc(d.name)}</h2><div class="tiny muted">${esc(d.code)} · Head: ${esc(nameOf(d.headId))}</div></div><span style="font:600 1.6rem var(--f-display)">${m.length}</span></div>
-      <div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr));margin-top:10px">${kpi('Present', st.filter(presentish).length, 'ok')}${kpi('Open tasks', open.length)}${kpi('Overdue', open.filter((t) => overdue(t)).length, open.some((t) => overdue(t)) ? 'bad' : '')}${kpi('On leave', st.filter((c) => c === 'LV').length)}${kpi('Requests in', inc.length)}${kpi('Late requests', inc.filter((r) => r.due < T).length, inc.some((r) => r.due < T) ? 'bad' : '')}</div></div>${dash ? `<div class="more"><button class="btn sm" data-a="dd-open" data-d="${d.id}">Open department dashboard</button></div>` : ''}</section>`;
+      ${full ? '' : '<p class="tiny muted" style="margin:8px 0 0">Attendance and task figures are visible to the department head and management.</p>'}<div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr));margin-top:10px;${full ? '' : 'display:none'}">${kpi('Present', st.filter(presentish).length, 'ok')}${kpi('Open tasks', open.length)}${kpi('Overdue', open.filter((t) => overdue(t)).length, open.some((t) => overdue(t)) ? 'bad' : '')}${kpi('On leave', st.filter((c) => c === 'LV').length)}${kpi('Requests in', inc.length)}${kpi('Late requests', inc.filter((r) => r.due < T).length, inc.some((r) => r.due < T) ? 'bad' : '')}</div></div>${dash ? `<div class="more"><button class="btn sm" data-a="dd-open" data-d="${d.id}">Open department dashboard</button></div>` : ''}</section>`;
   }).join('');
   const myD = S.me.deptId, heads = cfg().depts.filter((d) => d.headId === S.me.id).map((d) => d.id), mine = new Set([myD, ...heads]);
   let list = S.dreqs.slice();
@@ -196,7 +198,7 @@ function buildReport(key) {
     return { title: 'Approval aging — pending requests', f: [], cols: ['Code', 'Type', 'Title', 'Requester', 'With', 'Step', 'Raised', 'Age (h)', 'Waiting at step (h)', 'Response time', 'Escalated'], rows: list.map((r) => { const s = curStep(r); return [r.code, RTYPE[r.type], r.title, nameOf(r.empId), s ? nameOf(s.by) : '', s?.label || '', fmtDT(r.created), Math.round((Date.now() - r.created) / 3600000), s?.at ? Math.round((Date.now() - s.at) / 3600000) : '', pastSLA(r) ? 'LATE' : 'OK', s?.escalated ? 'Yes' : '']; }) };
   }
   if (key === 'dept') {
-    return { title: `Department MIS — ${fmtD(from)} to ${fmtD(to)}`, f: ['range'], cols: ['Department', 'Head', 'Headcount', 'Attendance %', 'Open tasks', 'Overdue', 'Blocked', 'Completed in period', 'Requests open', 'Requests late', 'Resolved on time %'], rows: cfg().depts.map((d) => {
+    return { title: `Department MIS — ${fmtD(from)} to ${fmtD(to)}`, f: ['range'], cols: ['Department', 'Head', 'Headcount', 'Attendance %', 'Open tasks', 'Overdue', 'Blocked', 'Completed in period', 'Requests open', 'Requests late', 'Resolved on time %'], rows: cfg().depts.filter((d) => isMgmt() || d.headId === S.me.id).map((d) => {
       const m2 = active().filter((e) => e.deptId === d.id); let exp = 0, pres = 0;
       for (const e of m2) for (const day of eachDay(from, to)) { const c = dayStatus(e, day).code; if (['WO', 'H', '', 'PS', 'NI'].includes(c)) continue; exp++; if (presentish(c)) pres += c === 'HD' ? 0.5 : 1; }
       const t = S.tasks.filter((x) => x.deptId === d.id), o = t.filter(openTask), inc = S.dreqs.filter((r) => r.toDept === d.id), io = inc.filter((r) => !['RESOLVED', 'CLOSED'].includes(r.status));

@@ -158,6 +158,14 @@ const effStatus = (t) => (t.status === 'TODO' && t.start > today() ? 'UPCOMING' 
 const overdue = (t, on = today()) => openTask(t) && t.due < on;
 const taskSort = (a, b) => (overdue(b) - overdue(a)) || (PRANK[a.priority] - PRANK[b.priority]) || a.due.localeCompare(b.due);
 const canManageTask = (t) => t.assignerId === S.me.id || isMgmt() || (t.assigneeId !== S.me.id && myTeam().includes(t.assigneeId));
+// Request and task numbers come from the server, which sees every record; a browser only sees its own and its team's.
+// (Off the server — the original artifact host — they are counted locally as before.)
+async function serverCode(prefix, list) {
+  if (!window.OH?.api) return nextCode(prefix, list);
+  const r = await window.OH.api('seq', { name: prefix });
+  if (!r?.code) fail('Couldn’t get a new number from the server. Try again.');
+  return r.code;
+}
 function nextCode(prefix, list) { const n = list.map((x) => +String(x.code || '').split('-')[1] || 0); return `${prefix}-${String((n.length ? Math.max(...n) : 0) + 1).padStart(4, '0')}`; }
 
 /* ═════════════ Approvals ═════════════ */

@@ -22,14 +22,14 @@ function confirmBox(title, text, onYes, { input = null, danger = true } = {}) {
 function taskForm(t) {
   const T = today(), isNew = !t;
   if (M && !M.asg) M.asg = S.ui.preAssignee ? [S.ui.preAssignee] : [];
-  const load = (id) => { const o = S.tasks.filter((x) => x.assigneeId === id && openTask(x)); return [o.length, o.filter((x) => overdue(x)).length]; };
+  const load = (id) => { if (!canSee(id)) return [null, 0]; const o = S.tasks.filter((x) => x.assigneeId === id && openTask(x)); return [o.length, o.filter((x) => overdue(x)).length]; };
   const others = S.tasks.filter((x) => openTask(x) && x.id !== t?.id).sort((a, b) => b.code.localeCompare(a.code));
   return `${mhead(isNew ? 'New task' : `Edit ${esc(t.code)}`)}<form data-f="task" data-id="${t?.id || ''}"><div class="body fgrid">
     <label class="f full">Title<input class="i" id="tf-title" name="title" required value="${esc(t?.title || '')}" placeholder="e.g. Reconcile HDFC current account — September"></label>
     <label class="f full">Details<textarea class="i" id="tf-desc" name="desc" rows="3">${esc(t?.desc || '')}</textarea></label>
     ${isNew ? `<div class="full"><label class="f">Assign to <span class="muted">(pick one or several — each person gets their own copy of the task)</span>
         <select class="i" id="tf-add" data-c="taskAdd">${peopleGroups(null, { blank: '+ Add a person…', exclude: M.asg, load: true })}</select></label>
-      <div class="row" style="margin-top:6px;gap:6px">${M.asg.map((id) => { const [o, od] = load(id); return `<span class="chip"><input type="hidden" name="assignees" value="${id}">${esc(nameOf(id))}${id === S.me.id ? ' (me)' : ''} <span class="tiny" style="${o >= 6 ? 'color:var(--warn);font-weight:600' : 'color:var(--muted)'}">${o} open${od ? ` · <span style="color:var(--bad)">${od} overdue</span>` : ''}</span><button type="button" class="chip-x" data-a="tf-rm" data-id="${id}" aria-label="Remove ${esc(nameOf(id))}">✕</button></span>`; }).join('') || '<span class="small muted">Nobody chosen yet.</span>'}
+      <div class="row" style="margin-top:6px;gap:6px">${M.asg.map((id) => { const [o, od] = load(id); return `<span class="chip"><input type="hidden" name="assignees" value="${id}">${esc(nameOf(id))}${id === S.me.id ? ' (me)' : ''} <span class="tiny" style="${o === null ? 'display:none' : o >= 6 ? 'color:var(--warn);font-weight:600' : 'color:var(--muted)'}">${o} open${od ? ` · <span style="color:var(--bad)">${od} overdue</span>` : ''}</span><button type="button" class="chip-x" data-a="tf-rm" data-id="${id}" aria-label="Remove ${esc(nameOf(id))}">✕</button></span>`; }).join('') || '<span class="small muted">Nobody chosen yet.</span>'}
         ${myTeam().length ? '<button type="button" class="btn sm ghost" data-a="tf-team">+ My whole team</button>' : ''}${!M.asg.includes(S.me.id) ? '<button type="button" class="btn sm ghost" data-a="tf-me">+ Me</button>' : ''}</div></div>`
     : `<label class="f">Assignee<select class="i" id="tf-asg" name="assignee">${peopleGroups(t.assigneeId)}</select></label>`}
     <label class="f">Priority<select class="i" id="tf-pr" name="priority">${opts(Object.entries(PRIO).map(([k, v]) => [k, v[0]]), t?.priority || 'MEDIUM')}</select></label>
@@ -47,9 +47,16 @@ function taskForm(t) {
     <datalist id="projects">${[...new Set(S.tasks.map((x) => x.project).filter(Boolean))].map((p) => `<option value="${esc(p)}">`).join('')}</datalist>
   </div><footer><button type="button" class="btn" data-a="close">Cancel</button><button class="btn pri" type="submit">${isNew ? 'Create task' : 'Save changes'}</button></footer></form>`;
 }
+// a record that isn't here yet: wait a few seconds for it to arrive, then say it isn't available (deleted, reassigned,
+// or not shared with this user) instead of loading forever
+function notLoaded(what) {
+  if (M && !M.waitSince) { M.waitSince = Date.now(); setTimeout(() => { if (M?.waitSince) drawModal(); }, 8100); }
+  if (!M || Date.now() - M.waitSince < 8000) return `${mhead('Opening…')}<div class="body muted">Loading the latest data…</div>`;
+  return `${mhead('Not available')}<div class="body">${empty(`This ${what} isn’t available to you — it may have been deleted or reassigned, or it isn’t shared with you.`)}</div><footer><button class="btn" data-a="close">Close</button></footer>`;
+}
 function taskDetail(id) {
   const t = S.tasks.find((x) => x.id === id);
-  if (!t) return `${mhead('Opening…')}<div class="body muted">Loading the latest data…</div>`;
+  if (!t) return notLoaded('task');
   const mine = t.assigneeId === S.me.id, mgr = canManageTask(t), st = effStatus(t), closed = !openTask(t);
   const rev = S.reqs.find((r) => r.type === 'REVIEW' && r.data.taskId === t.id && r.status === 'PENDING');
   const iReview = rev && curStep(rev)?.by === S.me.id;
@@ -129,16 +136,18 @@ function reqForm(type, extra = {}) {
 const DLABEL = { from: 'From', to: 'To', lt: 'Leave type', days: 'Days', half: 'Half day', session: 'Session', reason: 'Reason', doc: 'Document link', date: 'Date', inT: 'Check-in', outT: 'Check-out', kind: 'Type', location: 'Location', hours: 'Hours', category: 'Category', billDate: 'Bill date', link: 'Link', vendor: 'Vendor', document: 'Document', purpose: 'Purpose', newDue: 'New due date', oldDue: 'Current due date', note: 'Note', resubmitNote: 'Resubmission note', warnings: 'Flags' };
 function reqDetail(id) {
   const r = S.reqs.find((x) => x.id === id);
-  if (!r) return `${mhead('Opening…')}<div class="body muted">Loading the latest data…</div>`;
+  if (!r) return notLoaded('request');
   const s = curStep(r), canDecide = r.status === 'PENDING' && s?.by === S.me.id, isReq = r.empId === S.me.id || r.raisedBy === S.me.id;
   let ctx = '';
-  if (r.type === 'LEAVE') {
+  if (!canSee(r.empId) && ['LEAVE', 'CORRECTION'].includes(r.type)) {
+    ctx = '<p class="tiny muted">Leave balances, team leave and recorded attendance are visible to the employee’s managers and HR.</p>';
+  } else if (r.type === 'LEAVE') {
     const e = empById(r.empId), bals = e ? balances(e, +r.data.from.slice(0, 4)) : [];
     const mates = e ? active().filter((x) => x.id !== e.id && x.managerId && x.managerId === e.managerId) : [];
     const away = mates.filter((m) => reqsOf('LEAVE', m.id).some((x) => ['APPROVED', 'PENDING'].includes(x.status) && !x.data.cancelled && x.data.from <= r.data.to && x.data.to >= r.data.from));
     ctx = `<div class="card body" style="background:var(--sunk);border:0"><h3>Leave context</h3><div class="row small" style="margin-top:6px">${bals.map((b) => `<span>${esc(b.lt.code)}: <b>${b.lt.quota ? b.avail : '—'}</b> left</span>`).join(' · ')}</div><div class="small" style="margin-top:4px">Team members away then: ${away.length ? esc(away.map((a) => a.name).join(', ')) : 'none'}</div>${r.data.cancelOf ? '<div class="small" style="color:var(--warn);margin-top:4px">This asks to cancel leave that was already approved — approving restores the balance.</div>' : ''}</div>`;
   }
-  if (r.type === 'CORRECTION') {
+  if (r.type === 'CORRECTION' && canSee(r.empId)) {
     const e = empById(r.empId), ds = dayStatus(e, r.data.date);
     ctx = `<div class="card body" style="background:var(--sunk);border:0"><h3>Recorded on ${fmtD(r.data.date)}</h3><div class="small">${stPill(ds.code)} In ${hm(ds.inT)} · Out ${hm(ds.outT)} · punches: ${(ds.punches || []).map((p) => `${hm(p.t)} (${p.s})`).join(', ') || 'none'}</div><div class="tiny muted">Approving adds correction punches; the original punches stay.</div></div>`;
   }
@@ -195,31 +204,34 @@ function dreqDetail(id) {
 function empForm(id) {
   const e = id ? empById(id) : null, hr = isHR();
   if (id && !e) return null;
-  const T = today(), bals = e ? balances(e) : [];
+  // private details (and leave balances) are only sent to the person, their managers, management and payroll
+  const priv = !e || hr || canSee(e.id);
+  const T = today(), bals = e && priv ? balances(e) : [];
   const ro = !hr ? 'disabled' : '';
   return `${mhead(e ? esc(e.name) : 'Add employee', e ? `${esc(e.code)} · ${esc(e.designation || '')}` : 'Link their Claude login below so they’re recognised when they open OfficeHub')}
   <form data-f="emp" data-id="${e?.id || ''}"><div class="body fgrid">
     <label class="f">Full name<input class="i" id="ef-n" name="name" required value="${esc(e?.name || '')}" ${ro}></label>
     <label class="f">Employee code<input class="i" id="ef-c" name="code" required value="${esc(e?.code || '')}" ${ro}></label>
     <label class="f">Work email<input class="i" id="ef-e" type="email" name="email" value="${esc(e?.email || '')}" ${ro}></label>
-    <label class="f">Phone<input class="i" id="ef-p" name="phone" value="${esc(e?.phone || '')}" ${ro}></label>
+    ${priv ? `<label class="f">Phone<input class="i" id="ef-p" name="phone" value="${esc(e?.phone || '')}" ${ro}></label>` : ''}
     <label class="f">Designation<input class="i" id="ef-d" name="designation" value="${esc(e?.designation || '')}" ${ro}></label>
     <label class="f">Department<select class="i" id="ef-dp" name="deptId" ${ro}>${deptOpts(e?.deptId, '—')}</select></label>
     <label class="f">Reports to<select class="i" id="ef-m" name="managerId" ${ro}>${peopleOpts(e?.managerId, '—', active().filter((x) => x.id !== e?.id).map((x) => x.id))}</select></label>
     <label class="f">Role in this app<select class="i" id="ef-r" name="role" ${ro}>${opts([['EMPLOYEE', 'Employee'], ['MANAGER', 'Manager'], ['HR', 'HR'], ['DIRECTOR', 'Director'], ['ADMIN', 'Administrator']], e?.role || 'EMPLOYEE')}</select></label>
-    <label class="f">Biometric ID (on the machine)<input class="i" id="ef-b" name="bioId" value="${esc(e?.bioId || '')}" ${ro}></label>
+    ${priv ? `<label class="f">Biometric ID (on the machine)<input class="i" id="ef-b" name="bioId" value="${esc(e?.bioId || '')}" ${ro}></label>` : ''}
     <label class="f">Status<select class="i" id="ef-s" name="status" ${ro}>${opts([['ACTIVE', 'Active'], ['PROBATION', 'Probation'], ['ON_NOTICE', 'On notice'], ['EXITED', 'Exited']], e?.status || 'ACTIVE')}</select></label>
     <label class="f">Joining date<input class="i" id="ef-j" type="date" name="joining" value="${e?.joining || ''}" ${ro}></label>
-    <label class="f">Probation ends<input class="i" id="ef-pe" type="date" name="probEnd" value="${e?.probEnd || ''}" ${ro}></label>
-    <label class="f">Date of birth<input class="i" id="ef-dob" type="date" name="dob" value="${e?.dob || ''}" ${ro}></label>
-    <label class="f">Last working day (exit)<input class="i" id="ef-x" type="date" name="exitDate" value="${e?.exitDate || ''}" ${ro}></label>
-    <label class="f full">Exit clearance / handover notes<input class="i" id="ef-cl" name="clearance" value="${esc(e?.clearance || '')}" placeholder="Handover done; laptop returned; accounts cleared…" ${ro}></label>
+    ${priv ? `<label class="f">Probation ends<input class="i" id="ef-pe" type="date" name="probEnd" value="${e?.probEnd || ''}" ${ro}></label>` : ''}
+    ${priv ? `<label class="f">Date of birth<input class="i" id="ef-dob" type="date" name="dob" value="${e?.dob || ''}" ${ro}></label>` : ''}
+    ${priv ? `<label class="f">Last working day (exit)<input class="i" id="ef-x" type="date" name="exitDate" value="${e?.exitDate || ''}" ${ro}></label>` : ''}
+    ${priv ? `<label class="f full">Exit clearance / handover notes<input class="i" id="ef-cl" name="clearance" value="${esc(e?.clearance || '')}" placeholder="Handover done; laptop returned; accounts cleared…" ${ro}></label>` : ''}
     ${canSalary() ? (ensurePay(), PAY.err ? '<p class="tiny muted full">Salary is protected — you need Editor access to the app to see or change it.</p>' : `<label class="f">Monthly salary (₹, gross)<input class="i" id="ef-sal" name="salary" type="number" min="0" step="100" value="${e ? (PAY.map[e.id]?.monthly ?? '') : ''}" placeholder="e.g. 35000"></label><span class="tiny muted" style="align-self:end">Visible only to HR and administrators.</span>`) : ''}
-    <label class="f full">Assets issued<input class="i" id="ef-as" name="assets" value="${esc(e?.assets || '')}" placeholder="Laptop Dell 5440 (SN…), SIM, ID card" ${ro}></label>
+    ${priv ? `<label class="f full">Assets issued<input class="i" id="ef-as" name="assets" value="${esc(e?.assets || '')}" placeholder="Laptop Dell 5440 (SN…), SIM, ID card" ${ro}></label>` : ''}
     ${hr ? `<div class="full ppl"><div class="small muted" style="margin-bottom:4px">Claude login: ${e?.userId ? '<span class="pill t-ok">Linked</span>' : '<span class="pill">Not linked</span>'} — search by name to link</div>
       <input class="i" id="ef-find" data-search="people" placeholder="Search your organisation by name or email" autocomplete="off"><input type="hidden" id="ef-uid" name="userId" value="${esc(S.ui.pickUid ?? e?.userId ?? '')}"><div class="menu" id="ef-menu" hidden></div></div>` : ''}
   </div>
-  ${e ? `<div class="body" style="border-top:1px solid var(--line)"><h3>Leave balances ${T.slice(0, 4)}</h3><div class="row small" style="margin-top:6px">${bals.map((b) => `<span>${esc(b.lt.code)} <b>${b.lt.quota ? b.avail : '—'}</b> left (${b.used} used)</span>`).join(' · ')}</div>
+  ${e && !priv ? '<div class="body small muted" style="border-top:1px solid var(--line)">Leave balances and private details are visible to the employee, their managers and HR.</div>' : ''}
+  ${e && priv ? `<div class="body" style="border-top:1px solid var(--line)"><h3>Leave balances ${T.slice(0, 4)}</h3><div class="row small" style="margin-top:6px">${bals.map((b) => `<span>${esc(b.lt.code)} <b>${b.lt.quota ? b.avail : '—'}</b> left (${b.used} used)</span>`).join(' · ')}</div>
     ${hr ? `<div class="row" style="margin-top:8px"><select class="i" id="ef-adj-lt" style="width:auto">${opts(cfg().leaveTypes.map((l) => [l.code, l.code]))}</select><input class="i" id="ef-adj-v" type="number" step="0.5" placeholder="+/- days" style="width:110px"><input class="i" id="ef-adj-r" placeholder="Reason (kept in audit log)" style="flex:1;min-width:140px"><button type="button" class="btn" data-a="leave-adj" data-id="${e.id}">Adjust</button></div>` : ''}
     ${(e.history || []).length ? `<h3 style="margin-top:12px">History</h3>${e.history.slice().reverse().map((h) => `<div class="tiny" style="margin-top:4px"><b>${esc(h.kind)}</b> ${fmtD(h.date)} — ${esc(h.from || '—')} → ${esc(h.to || '—')}</div>`).join('')}` : ''}</div>` : ''}
   <footer>${e ? `<button type="button" class="btn" data-a="new-task" data-assignee="${e.id}">Assign a task</button>${e.id !== S.me.id ? `<button type="button" class="btn" data-a="dm" data-id="${e.id}">Message</button>` : ''}${hr && e.userId && e.id !== S.me.id ? `<button type="button" class="btn danger" data-a="acct-reset" data-id="${e.id}">Reset password</button>` : ''}` : ''}<span style="flex:1"></span><button type="button" class="btn" data-a="close">Close</button>${hr ? `<button class="btn pri" type="submit">${e ? 'Save' : 'Add employee'}</button>` : ''}</footer></form>`;
