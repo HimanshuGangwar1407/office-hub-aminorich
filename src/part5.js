@@ -163,7 +163,7 @@ function vPeople() {
     const node = (e) => { const kids = active().filter((k) => k.managerId === e.id); return `<li style="margin-top:8px"><button class="btn" data-a="emp" data-id="${e.id}" style="text-align:left">${avatar(e.name)}<span><b style="font-weight:600">${esc(e.name)}</b><br><span class="tiny muted">${esc(e.designation || '')} · ${esc(deptOf(e.deptId)?.code || '')}</span></span></button>${kids.length ? `<ul style="list-style:none;margin:0;padding-left:22px;border-left:1px solid var(--line)">${kids.map(node).join('')}</ul>` : ''}</li>`; };
     body += `<ul style="list-style:none;padding:0;margin:0">${active().filter((e) => !e.managerId || !ids.has(e.managerId)).map(node).join('')}</ul>`;
   }
-  return shell(body, 'People', 'One employee master used by attendance, leave, tasks and approvals', isHR() ? '<button class="btn pri" data-a="emp-new">Add employee</button>' : '');
+  return shell(body, 'People', 'One employee master used by attendance, leave, tasks and approvals', canAddPeople() ? '<button class="btn pri" data-a="emp-new">Add employee</button>' : '');
 }
 
 /* ═════════════ Reports ═════════════ */
