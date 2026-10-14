@@ -122,10 +122,10 @@ function vDepartments() {
   const ppl = active();
   const cards = cfg().depts.map((d) => {
     const m = ppl.filter((e) => e.deptId === d.id), st = m.map((e) => dayStatus(e, T).code);
-    const open = S.tasks.filter((t) => t.deptId === d.id && openTask(t));
+    const open = S.tasks.filter((t) => t.deptId === d.id && openTask(t)), dash = ddDepts().some((x) => x.id === d.id);
     const inc = S.dreqs.filter((r) => r.toDept === d.id && !['RESOLVED', 'CLOSED'].includes(r.status));
     return `<section class="card"><div class="body"><div class="row" style="justify-content:space-between"><div><h2>${esc(d.name)}</h2><div class="tiny muted">${esc(d.code)} · Head: ${esc(nameOf(d.headId))}</div></div><span style="font:600 1.6rem var(--f-display)">${m.length}</span></div>
-      <div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr));margin-top:10px">${kpi('Present', st.filter(presentish).length, 'ok')}${kpi('Open tasks', open.length)}${kpi('Overdue', open.filter((t) => overdue(t)).length, open.some((t) => overdue(t)) ? 'bad' : '')}${kpi('On leave', st.filter((c) => c === 'LV').length)}${kpi('Requests in', inc.length)}${kpi('Late requests', inc.filter((r) => r.due < T).length, inc.some((r) => r.due < T) ? 'bad' : '')}</div></div></section>`;
+      <div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr));margin-top:10px">${kpi('Present', st.filter(presentish).length, 'ok')}${kpi('Open tasks', open.length)}${kpi('Overdue', open.filter((t) => overdue(t)).length, open.some((t) => overdue(t)) ? 'bad' : '')}${kpi('On leave', st.filter((c) => c === 'LV').length)}${kpi('Requests in', inc.length)}${kpi('Late requests', inc.filter((r) => r.due < T).length, inc.some((r) => r.due < T) ? 'bad' : '')}</div></div>${dash ? `<div class="more"><button class="btn sm" data-a="dd-open" data-d="${d.id}">Open department dashboard</button></div>` : ''}</section>`;
   }).join('');
   const myD = S.me.deptId, heads = cfg().depts.filter((d) => d.headId === S.me.id).map((d) => d.id), mine = new Set([myD, ...heads]);
   let list = S.dreqs.slice();
