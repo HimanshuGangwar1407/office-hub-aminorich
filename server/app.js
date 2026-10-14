@@ -2,7 +2,7 @@
 import { q, getPool, ensureSchema, writeDoc, getDoc, parentOf } from './db.js';
 import { sessionFrom, hashPassword, checkPassword, passwordProblem, newUid, makeToken, cookieHeader, safeEqual } from './auth.js';
 import { chatWriteProblem, clearedChatsProblem } from './chat-rules.js';
-import { locWriteProblem, LIVE_STOPPED } from './loc-rules.js';
+import { locWriteProblem, LIVE_STOPPED, LIVE_EXPIRED } from './loc-rules.js';
 import { buildCtx, accessFor, canReadDoc, shapeDoc, empWriteProblem, chatAccessProblem, ntfWriteProblem, mailWriteProblem, blobReadable, blobWriteProblem, refUsesFile } from './access.js';
 import { isAssignableCtx, complaintWriteProblem, buildComplaint } from './complaints.js';
 import { policyWriteProblem, policyFileWriteProblem, policyVisible, isPolicyManager } from './policy.js';
@@ -60,7 +60,7 @@ async function checkWrite(op, path, data, old, s, A) {
   const no = (m) => fail(403, 'permission_denied', m || 'You don’t have permission to change this.');
   if (!s.active) no('Your account is not active. Ask HR.');
   if (c === 'auth') no();
-  if (c === 'loc') { const bad = locWriteProblem(op, path, data, old, s); if (bad === LIVE_STOPPED) fail(409, 'live_stopped', bad); if (bad) no(bad); return; }
+  if (c === 'loc') { const bad = locWriteProblem(op, path, data, old, s); if (bad === LIVE_STOPPED) fail(409, 'live_stopped', bad); if (bad === LIVE_EXPIRED) fail(409, 'live_expired', bad); if (bad) no(bad); return; }
   if (c === 'chat') { const bad = chatAccessProblem(op, path, data, old, A); if (bad) no(bad); return; }
   if (c === 'ntf') { const bad = ntfWriteProblem(op, data, old, s); if (bad) no(bad); return; }
   if (c === 'mail') { const bad = mailWriteProblem(op, data, old, A); if (bad) no(bad); return; }

@@ -6,6 +6,10 @@
    Live sharing: live = { on, since, every (minutes), consentAt, stoppedAt } on the day's record. Only the employee can
    write their records and only they, their managers / department head, HR, directors and admins can read them (server/loc-rules.js). */
 const LOC = { live: false, timer: null, lastErr: '', since: 0, consentAt: 0, day: '', lastTick: 0, busy: false };
+// A live share ends by itself this long after it starts (the server enforces the same limit, server/loc-rules.js).
+const LIVE_MAX_MS = 8 * 3600000;
+const liveEnded = (live) => !!live?.on && typeof live.since === 'number' && Date.now() >= live.since + LIVE_MAX_MS;
+const LIVE_ENDED_MSG = 'Live location stopped after 8 hours. Press Start to share again.';
 const liveEvery = () => Math.min(60, Math.max(2, Math.round(+cfg().liveEveryMin || 10))); // minutes between live updates
 const locOf = (empId, d) => S.locs.find((l) => l.empId === empId && l.date === d);
 const lastPing = (l) => l?.pings?.[l.pings.length - 1] || null;
@@ -120,6 +124,7 @@ async function liveTick() {
     // the WFH day is over: past midnight, not a WFH / official-duty day, or checked out
     const over = d !== LOC.day ? 'the day ended' : !remoteKind(S.me.id, d) ? 'today isn’t a work-from-home day' : checkedOut(S.me.id, d) ? 'you checked out' : '';
     if (over) { await stopLive(true, true); toast(`Live location stopped — ${over}.`, 'warn'); return; }
+    if (Date.now() - LOC.since >= LIVE_MAX_MS) { await stopLive(true, true); toast(LIVE_ENDED_MSG, 'warn'); return; }
     const g = await tryGps(true);
     if (!LOC.live) return;
     if (g.err) {
@@ -130,7 +135,9 @@ async function liveTick() {
     await livePing(g, 'update'); LOC.lastErr = '';
   } catch (e) {
     // the server refuses updates from a run that was stopped on another tab or device
-    if (e?.code === 'live_stopped') { await stopLive(true); toast('Live location was stopped on another tab or device.', 'warn'); } else LOC.lastErr = errText(e);
+    if (e?.code === 'live_stopped') { await stopLive(true); toast('Live location was stopped on another tab or device.', 'warn'); }
+    else if (e?.code === 'live_expired') { await stopLive(true, true); toast(LIVE_ENDED_MSG, 'warn'); }
+    else LOC.lastErr = errText(e);
   } finally { LOC.busy = false; schedule(); }
 }
 // write: also mark the day's record as stopped, so managers see “Stopped” rather than “Signal lost”
@@ -165,7 +172,7 @@ function liveConsentForm() {
     <p style="margin-top:0">While live sharing is on, OfficeHub records this device’s location every <b>${liveEvery()} minutes</b>.</p>
     <ul class="small consent-list">
       <li><b>Who can see it:</b> you, your reporting manager (and their managers), your department head, HR, directors and administrators. Other colleagues can’t see these location updates.</li>
-      <li><b>When it runs:</b> only while OfficeHub is open on this device and you’re signed in. It stops when you press <i>Stop</i>, check out or sign out. If you close the app it pauses, and your manager sees “Signal lost”.</li>
+      <li><b>When it runs:</b> only while OfficeHub is open on this device and you’re signed in. It stops when you press <i>Stop</i>, check out or sign out, and <b>automatically after 8 hours</b> (press Start again to share for another 8 hours). If you close the app it pauses, and your manager sees “Signal lost”.</li>
       <li><b>What is saved:</b> your coordinates, how accurate they are and the time, with today’s attendance.</li>
       <li>Your browser will ask for permission to use your location.</li></ul>
     ${navigator.wakeLock ? '<label class="check" style="margin-bottom:8px"><input type="checkbox" id="lv-wake" name="wake" checked> Keep my screen on while sharing — phones stop sending updates when the screen turns off (uses more battery)</label>' : '<p class="small muted" style="margin:0 0 8px">On a phone, keep OfficeHub open with the screen on — updates stop while the screen is off.</p>'}
@@ -331,7 +338,7 @@ function locCell(empId, d) {
   if (!seesLocOf(empId)) return ''; // only Admin, HR and Manager accounts receive other people's locations
   const l = locOf(empId, d), p = lastPing(l);
   if (!p) return needsLoc(empId, d) && d <= today() ? '<span class="tiny" style="color:var(--warn)">Not shared</span>' : '';
-  const far = awayFromHome(empId, p), live = l.pings.some((x) => x.src === 'live' || x.src === 'live-gps');
+  const far = awayFromHome(empId, p), live = wfhState(l) === 'live'; // a share that stopped or ran out is not live any more
   return `<button class="btn sm ghost" data-a="loc-view" data-e="${empId}" data-d="${d}" style="padding:2px 6px;text-align:left"><span class="small">${live ? '<b style="color:var(--accent)">Live</b> · ' : ''}${hm(p.t)}${l.pings.length > 1 ? ` (${l.pings.length})` : ''}</span>${far != null && far > 2 ? `<br><span class="tiny" style="color:var(--warn)">${kmTxt(far)} away</span>` : p.addr ? `<br><span class="tiny muted trunc" style="display:inline-block;max-width:150px">${esc(p.addr)}</span>` : ''}</button>`;
 }
 const locText = (empId, d) => { const p = lastPing(locOf(empId, d)); return p ? `${hm(p.t)} ${p.addr || ''} ${mapUrl(p) || ''}`.trim() : ''; };
@@ -343,12 +350,15 @@ function myLocStrip() {
   if (!kind && !p && !LOC.live) return '';
   const every = +(cfg().locEveryH ?? 3), out = punchesOn(S.me.id, T).length % 2 === 0 && punchesOn(S.me.id, T).length > 0;
   const elsewhere = !LOC.live && !!l?.live?.on && !!l.live.dev && l.live.dev !== LOC.dev && wfhState(l) === 'live'; // another tab or device is sending
-  const paused = !LOC.live && !!l?.live?.on && !elsewhere; // live sharing was on, but nothing is sending (the app was closed or reloaded)
+  const expired = !LOC.live && liveEnded(l?.live); // the 8 hours ran out while the app was closed
+  const paused = !LOC.live && !!l?.live?.on && !elsewhere && !expired; // live sharing was on, but nothing is sending (the app was closed or reloaded)
   const stale = p && every > 0 && !out && !LOC.live && !paused && p.src !== 'live' && Date.now() - p.t > every * 3600000;
-  const tone = (LOC.live && !LOC.lastErr) || elsewhere ? 'var(--ok)' : !p || stale || paused || LOC.lastErr ? 'var(--warn)' : 'var(--ok)';
-  const msg = LOC.live ? `<b>Live location on</b> · updates every ${liveEvery()} min · last ${hm(p?.t)}${LOC.wake ? ' · screen kept on' : ''}${LOC.lastErr ? ` · <span style="color:var(--warn)">${esc(LOC.lastErr)} Retrying.</span>` : ''}`
+  const tone = (LOC.live && !LOC.lastErr) || elsewhere ? 'var(--ok)' : !p || stale || paused || expired || LOC.lastErr ? 'var(--warn)' : 'var(--ok)';
+  const left = LOC.live ? Math.max(0, Math.ceil((LOC.since + LIVE_MAX_MS - Date.now()) / 60000)) : 0;
+  const msg = LOC.live ? `<b>Live location on</b> · updates every ${liveEvery()} min · last ${hm(p?.t)} · stops in ${mins(left)}${LOC.wake ? ' · screen kept on' : ''}${LOC.lastErr ? ` · <span style="color:var(--warn)">${esc(LOC.lastErr)} Retrying.</span>` : ''}`
     : elsewhere ? `<b>Live location on</b> in another tab or device · last ${hm(p?.t)}`
     : paused ? `Live sharing is paused — OfficeHub was closed or reloaded (last update ${hm(p?.t)}). Your manager sees “Signal lost” until you resume.`
+    : expired ? `Live sharing ended after 8 hours (at ${hm(l.live.since + LIVE_MAX_MS)}). Press Start to share again.`
     : !p ? `${kind === 'OD' ? 'Official duty' : 'Working from home'} today — share your location`
     : p.src === 'live' ? `Live location link shared at ${hm(p.t)}`
     : stale ? `Location last shared at ${hm(p.t)} — please share again` : `Location shared at ${hm(p.t)}`;
@@ -371,7 +381,7 @@ function myLocStrip() {
      stopped / once / none – not sharing live: listed separately, never on the map */
 const liveOutdated = (l) => Date.now() - (l?.last || 0) > ((+l?.live?.every || 10) * 2 + 2) * 60000;
 function wfhState(l) {
-  if (l?.live?.on) return liveOutdated(l) ? 'outdated' : 'live';
+  if (l?.live?.on) return liveEnded(l.live) ? 'stopped' : liveOutdated(l) ? 'outdated' : 'live'; // after 8 hours it counts as stopped
   if (l?.live?.stoppedAt) return 'stopped';
   return lastPing(l) ? 'once' : 'none';
 }
@@ -423,7 +433,7 @@ function vWfhLive() {
         <td><div class="row" style="gap:6px;flex-wrap:nowrap">${r.p?.lat != null ? `<button class="btn sm" data-a="loc-focus" data-e="${r.e.id}">Show on map</button>` : ''}${r.p && mapUrl(r.p) ? `<a class="btn sm ghost" href="${esc(mapUrl(r.p))}" target="_blank" rel="noopener">Maps</a>` : ''}<button class="btn sm ghost" data-a="loc-view" data-e="${r.e.id}" data-d="${T}">History</button></div></td></tr>`).join('')}
     </tbody></table></div>` : empty(all.length ? 'Nobody matches these filters.' : 'Nobody is sharing their location right now.'), { list: true })}
     ${others.length ? card('On WFH / official duty today — not sharing live', `<div class="tbl-wrap"><table class="t"><thead><tr><th>Employee</th><th>Department</th><th>Status</th></tr></thead><tbody>
-      ${others.map((r) => `<tr><td>${person(r.e.id, r.e.code ? esc(r.e.code) : '')}</td><td class="small">${esc(deptOf(r.e.deptId)?.name || '—')}</td><td class="small">${r.st === 'stopped' ? `Stopped sharing at ${hm(r.l.live.stoppedAt)}` : r.st === 'once' ? `Shared once at ${hm(r.p.t)} — not live` : 'Hasn’t shared a location today'}</td></tr>`).join('')}
+      ${others.map((r) => `<tr><td>${person(r.e.id, r.e.code ? esc(r.e.code) : '')}</td><td class="small">${esc(deptOf(r.e.deptId)?.name || '—')}</td><td class="small">${r.st === 'stopped' ? (r.l.live.stoppedAt ? `Stopped sharing at ${hm(r.l.live.stoppedAt)}` : `Stopped — 8-hour limit reached at ${hm(r.l.live.since + LIVE_MAX_MS)}`) : r.st === 'once' ? `Shared once at ${hm(r.p.t)} — not live` : 'Hasn’t shared a location today'}</td></tr>`).join('')}
     </tbody></table></div>`, { list: true }) : ''}
     <p class="tiny muted">Employees share only after agreeing to it, and only while OfficeHub is open on their device; positions update every ${every} minutes. “Outdated” means no update for over ${every * 2 + 2} minutes. Only Admin, HR and Manager accounts can see this page — the server sends these locations to nobody else.</p>`;
   return shell(body, 'WFH locations', `Live locations of employees working from home · updates every ${every} min`);
