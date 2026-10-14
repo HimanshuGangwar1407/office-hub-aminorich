@@ -3,7 +3,8 @@
 //
 // The rule, everywhere: a person's records go to
 //   - the person themselves;
-//   - their managers — the reporting-manager chain upwards and the head of their department (the app's "team");
+//   - their managers — the reporting-manager chain upwards, the head of their department and accounts with the
+//     Manager role in their department (the app's "team");
 //   - Admin, HR and Directors (company-wide management, as elsewhere in the app);
 // plus, for a specific record, the people that record names: a request's approvers (steps), the person who raised
 // it and anyone it was escalated to (watchers); a task's assigner, reviewer and people asked to look at it
@@ -24,6 +25,9 @@ export function teamOf(empId, ctx) {
   const walk = (m) => { for (const id of byMgr.get(m) || []) if (!out.has(id)) { out.add(id); walk(id); } };
   walk(empId);
   for (const d of ctx.depts || []) if (d?.headId === empId) for (const [id, e] of ctx.emps) if (e?.deptId === d.id && id !== empId) out.add(id);
+  // accounts with the Manager role manage their whole department
+  const me = ctx.emps.get(empId);
+  if (me?.role === 'MANAGER' && me.deptId && me.active !== false) for (const [id, e] of ctx.emps) if (e?.deptId === me.deptId && id !== empId) out.add(id);
   out.delete(empId);
   return out;
 }

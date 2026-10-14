@@ -28,6 +28,16 @@ test('a team is the reporting chain below someone plus the departments they head
   assert.deepEqual([...teamOf('OHEAD', ctx)].sort(), ['ACC1', 'ADM', 'DIRP', 'HRP', 'O1', 'PAYU'].filter((x) => ctx.emps.get(x).deptId === 'ops').sort());
 });
 
+test('an account with the Manager role manages their whole department', () => {
+  const c2 = { emps: new Map([...ctx.emps, ['M2', { deptId: 'ops', role: 'MANAGER' }], ['X2', { deptId: 'ops', role: 'MANAGER', active: false }]]), depts: ctx.depts };
+  assert.deepEqual([...teamOf('M2', c2)].sort(), ['ADM', 'DIRP', 'HRP', 'O1', 'OHEAD', 'PAYU', 'X2'], 'everyone in Operations');
+  assert.deepEqual([...teamOf('X2', c2)], [], 'not when the account is inactive');
+  const s = sess('M2', 'MANAGER'), P = peopleAccess(s, c2);
+  assert.equal(peopleReadable('att/O1_2026-10', att('O1'), s, P), true, 'their department’s attendance');
+  assert.equal(peopleReadable('att/E1_2026-10', att('E1'), s, P), false, 'not another department’s');
+  assert.equal(peopleReadable('task/t9', { assigneeId: 'O1', assignerId: 'OHEAD' }, s, P), true);
+});
+
 test('attendance and work logs: the person, their managers and management — nobody else', () => {
   for (const p of ['att/E1_2026-10', 'wlog/E1_2026-10-14']) {
     const d = p.startsWith('att') ? att('E1') : { empId: 'E1', date: '2026-10-14' };
