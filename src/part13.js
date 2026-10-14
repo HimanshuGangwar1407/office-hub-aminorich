@@ -74,7 +74,7 @@ function vChats2() {
   const side = `<aside class="chat-side ${openId ? 'has-open' : ''}"><div class="chat-side-top"><input class="i" id="ch-q" data-i="chQ" placeholder="Search chats" value="${esc(ui('chQ', ''))}"><button class="btn pri sm" data-a="chat-new" title="New group">+ Group</button></div>
     <div class="dm-pick"><select class="i" id="ch-dm" data-c="chatDM" aria-label="Message a person">${peopleGroups(null, { blank: '✉ Message a person…', exclude: [S.me.id] })}</select></div>
     <div class="chat-list"><button class="chat-item ment ${mentionsView ? 'on' : ''}" data-a="chat-open" data-id="@mentions"><span class="av chav ck-ment">@</span><span class="grow"><b>Mentions</b><span class="tiny muted" style="display:block">Where people tagged you</span></span>${unM ? `<span class="ct">${unM}</span>` : ''}</button>
-      ${group('Starred', list.filter((c) => fav.has(c.id)))}${group('Company', list.filter((c) => c.kind === 'all' && !fav.has(c.id)))}${group('Departments', list.filter((c) => c.kind === 'dept' && !fav.has(c.id)))}${group('Groups', list.filter((c) => c.kind === 'group' && !fav.has(c.id)))}${group('Direct messages', list.filter((c) => c.kind === 'dm' && !fav.has(c.id)))}${list.length ? '' : empty('No chats match.')}
+      ${group('Starred', list.filter((c) => fav.has(c.id) && !c.peek))}${group('Company', list.filter((c) => c.kind === 'all' && !fav.has(c.id)))}${group('Departments', list.filter((c) => c.kind === 'dept' && !fav.has(c.id)))}${group('Groups', list.filter((c) => c.kind === 'group' && !fav.has(c.id) && !c.peek))}${group('Direct messages', list.filter((c) => c.kind === 'dm' && !fav.has(c.id) && !c.peek))}${group('Other people’s chats · administrator', list.filter((c) => c.peek))}${list.length ? '' : empty('No chats match.')}
       <div class="chat-sec">Online now · ${on.size}</div><div class="online-row">${[...on].filter((id) => id !== S.me.id).slice(0, 14).map((id) => `<button class="av-wrap" data-a="dm" data-id="${id}" title="${esc(nameOf(id))} — message">${avatar(nameOf(id))}<span class="ondot"></span></button>`).join('') || '<span class="tiny muted" style="padding:0 14px">Only you right now</span>'}</div></div></aside>`;
   let main = `<section class="chat-main empty-main">${empty('Pick a chat on the left, or message a person from the list.')}</section>`;
   if (mentionsView) {
@@ -130,9 +130,9 @@ function vChats2() {
         </div>`;
       }).join('')}</div>`;
     }
-    const canWrite = !S.readonly && (c.kind !== 'all' || isHR() || !c.hrOnly);
+    const canWrite = !S.readonly && !c.peek && (c.kind !== 'all' || isHR() || !c.hrOnly);
     const ed = CH2.editing;
-    main = `<section class="chat-main">
+    main = `<section class="chat-main${c.peek ? ' peek' : ''}">
       <header class="chat-head"><button class="btn ghost sm chat-back" data-a="chat-close" aria-label="Back to chats">‹</button>
         <span class="av-wrap">${c.kind === 'dm' ? avatar(c.title) : `<span class="av chav ck-${c.kind}">${c.kind === 'all' ? '★' : c.kind === 'dept' ? '#' : esc(initials(c.title))}</span>`}${other ? onlineDot(other, on) : ''}</span>
         <div class="grow" style="min-width:0"><b class="trunc" style="display:block">${esc(c.title)}</b><span class="tiny ${typ.length ? 'typing-t' : 'muted'}">${typ.length ? `${esc(typ.join(', '))} ${typ.length > 1 ? 'are' : 'is'} typing…` : c.kind === 'dm' ? `${esc(empById(other)?.designation || '')}${on.has(other) ? ' · <span class="on-t">online</span>' : ''}` : `${members.length} members · ${members.filter((x) => on.has(x)).length} online${c.kind === 'dept' ? ' · department' : c.kind === 'all' ? ' · whole company' : ''}`}</span></div>
@@ -142,7 +142,7 @@ function vChats2() {
       </header>
       <div class="tabs chat-tabs">${[['msgs', 'Messages'], ['pins', `Pinned${pins.length ? ` (${pins.length})` : ''}`], ['files', `Files (${msgs.filter((m) => m.file && !m.deleted).length})`], ['members', `Members (${members.length})`]].map(([k, l]) => `<button class="tab" aria-selected="${tab === k}" data-a="ui" data-k="chTab" data-v="${k}">${l}</button>`).join('')}</div>
       ${body}
-      ${tab === 'msgs' && canWrite ? `<form data-f="chat-send" class="composer">
+      ${tab === 'msgs' && c.peek ? '<div class="chat-peek tiny muted">Administrator view — read only. You aren’t a member of this chat.</div>' : ''}${tab === 'msgs' && canWrite ? `<form data-f="chat-send" class="composer">
         ${ed ? `<div class="quote row" style="justify-content:space-between;flex-wrap:nowrap;border-color:var(--c-amber)"><span class="trunc tiny"><b>Editing your message</b> — Enter to save, Esc to cancel</span><button type="button" class="btn ghost sm" data-a="chat-unedit">✕</button></div>` : ''}
         ${CHAT.replyTo ? `<div class="quote row" style="justify-content:space-between;flex-wrap:nowrap"><span class="trunc tiny">Replying to <b>${esc(nameOf(CHAT.replyTo.by))}</b>: ${esc(CHAT.replyTo.text || CHAT.replyTo.file?.name || '')}</span><button type="button" class="btn ghost sm" data-a="chat-unreply">✕</button></div>` : ''}
         ${CHAT.uploading ? `<div class="tiny muted">Uploading ${esc(CHAT.uploading)}…</div>` : ''}
@@ -505,6 +505,7 @@ function cmdkRun(it) {
 .msg-sys{text-align:center;font-size:.74rem;color:var(--muted);padding:6px 0}
 .msg-tools{position:absolute;right:14px;top:-14px;display:none;background:var(--surface);border:1px solid var(--line);border-radius:9px;box-shadow:var(--shadow);padding:2px;z-index:2}
 .msg:hover .msg-tools,.msg:focus-within .msg-tools{display:flex}
+.chat-main.peek .msg-tools{display:none!important}.chat-main.peek .rxp{pointer-events:none}.chat-peek{padding:10px 16px;border-top:1px solid var(--line);text-align:center}
 .msg-tools button{border:0;background:none;border-radius:6px;padding:3px 6px;cursor:pointer;font-size:.9rem;color:var(--ink)}
 .msg-tools button:hover{background:var(--sunk)}
 @media (hover:none){.msg-tools{position:static;display:flex;box-shadow:none;border:0;grid-column:2;justify-self:start;margin-top:2px;padding:0}}

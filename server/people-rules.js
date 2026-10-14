@@ -129,6 +129,7 @@ export function peopleWriteProblem(op, path, data, old, s, P, X = {}) {
   if (!P.active) return 'Your account is not active.';
   if (c === 'seq') return 'Codes are given out by the server.';
   if (c === 'audit') {
+    if (old && P.admin) return null; // administrators may correct or remove entries (the server records that it happened)
     if (old || op !== 'set') return 'The audit log cannot be changed.';
     if (data?.by == null && s?.bootstrap) return null; // first-time setup, before the owner has an employee record
     return data?.by === s.empId ? null : 'Audit entries are recorded in your own name.';
@@ -196,8 +197,8 @@ function reqProblem(op, next, old, s, P, X) {
   if (K.some((k) => ['empId', 'raisedBy', 'type', 'code'].includes(k))) return 'A request’s employee, requester, type and number can’t change.';
   const own = old.empId === s.empId || old.raisedBy === s.empId;
   if (P.mgmt) {
-    // management may correct requests, but never approve their own
-    if (old.empId === s.empId && ((K.includes('status') && next.status === 'APPROVED') || newlyApproved(old.steps, next.steps))) return 'You can’t approve your own request.';
+    // management may correct requests, but only administrators approve their own
+    if (old.empId === s.empId && !s.admin && ((K.includes('status') && next.status === 'APPROVED') || newlyApproved(old.steps, next.steps))) return 'You can’t approve your own request.';
     return null;
   }
   const involved = P.person(old.empId) || reqParties(old).includes(s.empId) || (old.type === 'EXPENSE' && P.accounts) || (X.cancelApprovers || []).includes(s.empId);
@@ -226,22 +227,21 @@ function reqProblem(op, next, old, s, P, X) {
   return 'You can’t change this request.';
 }
 
-// Who may add and change employee records besides HR / administrators: Directors (anyone but administrators) and
-// Managers (people in their own department, with the Employee or Manager role). Administrator access is only ever
-// given or removed by an administrator; nobody changes their own role; leave adjustments stay with HR.
+// Who may add and change employee records besides HR / administrators: Directors (anyone) and Managers (people in
+// their own department, with the Employee or Manager role). Administrator access is given or removed by administrators,
+// HR and Directors; only administrators change their own role; leave adjustments stay with HR.
 // Returns a reason, null when allowed, or undefined when the session isn't one of these roles (other rules apply).
 const ELEVATED = ['ADMIN', 'HR', 'DIRECTOR'];
 export function empManageProblem(op, id, data, old, s, P, ctx) {
   const next = op === 'update' ? { ...(old || {}), ...(data || {}) } : op === 'set' ? data || {} : null;
   const K = changedKeys(next, old);
   // for everyone, HR included: administrator access is an administrator's decision; nobody changes their own role
-  if (K.includes('role') && (next?.role === 'ADMIN' || old?.role === 'ADMIN') && !s?.admin && !s?.bootstrap) return 'Only an administrator can give or remove administrator access.';
-  if (K.includes('role') && old && id === s?.empId && !s?.bootstrap) return 'You can’t change your own role.';
+  if (K.includes('role') && (next?.role === 'ADMIN' || old?.role === 'ADMIN') && !s?.hr && !s?.bootstrap && !(s?.active && s?.role === 'DIRECTOR')) return 'Only an administrator, HR or a director can give or remove administrator access.';
+  if (K.includes('role') && old && id === s?.empId && !s?.admin && !s?.bootstrap) return 'You can’t change your own role.';
   if (s?.hr || s?.bootstrap) return null;
   if (!P.active || !['DIRECTOR', 'MANAGER'].includes(s?.role)) return undefined;
   if (op === 'delete') return 'Only HR can remove employees — set their status to Exited instead.';
   if (K.includes('leaveAdj')) return 'Only HR can adjust leave balances.';
-  if (old?.role === 'ADMIN') return 'Only an administrator can change an administrator’s record.';
   if (s.role === 'MANAGER') {
     const myDept = ctx.emps.get(s.empId)?.deptId || null;
     if (!myDept) return 'Your account has no department, so you can’t manage employees. Ask HR.';
@@ -263,6 +263,7 @@ export function auditEntry(op, path, data, old, s, now = Date.now()) {
   const [c, id] = path.split('/');
   const next = op === 'update' ? { ...(old || {}), ...(data || {}) } : op === 'set' ? data || null : null;
   const by = s?.empId || null;
+  if (c === 'audit') return old ? { at: now, by, action: op === 'delete' ? 'AUDIT_ENTRY_DELETED' : 'AUDIT_ENTRY_EDITED', detail: { entry: id, action: old.action || '' } } : null;
   if (c === 'att') {
     const emp = next?.empId || old?.empId;
     if (!emp || emp === by) return null;

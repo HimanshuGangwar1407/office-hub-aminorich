@@ -53,6 +53,8 @@ export function accessFor(s, ctx) {
     if (!c) return false;
     return (c.members || []).includes(s.empId) || (c.kind === 'group' && (c.admins || [c.createdBy]).includes(s.empId));
   }
+  // reading: administrators read every chat (direct and group chats included); writing still needs membership (chatOk)
+  const chatReadOk = (id) => chatOk(id) || (active && !!s?.admin && !!id && !!kindOfId(id));
   const seesEmpLoc = (empId) => all || empId === s?.empId;
   // chats whose membership can change while they already have messages (groups, departments): when this list
   // changes, the browser must reload its copy so it gets — or drops — their older messages
@@ -68,8 +70,8 @@ export function accessFor(s, ctx) {
   // reloads its copy so it gets the older records it may now see, and drops the ones it may no longer see
   const P = peopleAccess(s, ctx);
   const ppl = `${P.mgmt ? 'M' : 't' + hash([...P.team].sort().join(',')) + '.h' + hash([...P.headOf].sort().join(','))}${P.accounts ? 'A' : ''}${P.salary ? 'S' : ''}`;
-  const sig = `${all ? 'all' : 'own'}.c${hash([...new Set(shared)].sort().join(','))}.k${complaintStaff ? 1 : 0}${s?.admin ? 'a' : ''}.p${hash(visiblePolicies.join(','))}.w${ppl}`;
-  return { s, ctx, active, all, mgmt, chatOk, seesEmpLoc, complaintStaff, policyMgr, P, sig };
+  const sig = `${all ? 'all' : 'own'}.c${hash([...new Set(shared)].sort().join(','))}.k${complaintStaff ? 1 : 0}${s?.admin ? 'A' : ''}.p${hash(visiblePolicies.join(','))}.w${ppl}`;
+  return { s, ctx, active, all, mgmt, chatOk, chatReadOk, seesEmpLoc, complaintStaff, policyMgr, P, sig };
 }
 
 /** Can this record be sent to the session? `data` is null for deleted records. (Files are checked separately.) */
@@ -82,7 +84,7 @@ export function canReadDoc(path, data, A) {
   if (c === 'payroll') return !!s.salary || !data || shapePayroll(data, s, A.P) !== undefined; // everyone else: their own payslip
   if (c === 'pay' || c === 'fines') return !!s.salary;
   if (c === 'loc') return locVisible(path, s);
-  if (c === 'chat') return A.chatOk(a);
+  if (c === 'chat') return (A.chatReadOk || A.chatOk)(a);
   if (c === 'ntf') return !data || data.to === s.empId;
   if (c === 'mail') return !data || !!s.hr || data.empId === s.empId;
   if (c === 'blob') return false;

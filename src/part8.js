@@ -27,7 +27,10 @@ function myChats() {
   for (const d of cfg().depts) { const id = 'dept-' + d.id; out.push({ id, kind: 'dept', deptId: d.id, name: d.name, ...(CHAT.list.find((c) => c.id === id) || {}) }); }
   // a direct chat you deleted stays hidden until a newer message arrives, or you open it again ("Message a person")
   for (const c of CHAT.list) if ((c.kind === 'group' || c.kind === 'dm') && !c.archived && !(c.kind === 'dm' && dmHidden(c))) out.push(c);
-  return out.filter(inChat).map((c) => ({ ...c, title: chatTitle(c) }));
+  const mine = out.filter(inChat).map((c) => ({ ...c, title: chatTitle(c) }));
+  // administrators also read everyone else's group and direct chats — read only (the server sends them to administrators alone)
+  if (S.me?.role === 'ADMIN') for (const c of CHAT.list) if ((c.kind === 'group' || c.kind === 'dm') && !c.archived && !(c.members || []).includes(S.me.id) && !mine.some((x) => x.id === c.id)) mine.push({ ...c, peek: true, title: c.kind === 'dm' ? (c.members || []).map(nameOf).join(' ↔ ') : c.name });
+  return mine;
 }
 function chatTitle(c) {
   if (c.kind === 'dm') { const other = (c.members || []).find((m) => m !== S.me.id); return nameOf(other); }
@@ -46,7 +49,7 @@ function hiddenAt(mark, msgs, i) {
 // true while the chat's latest message is still the one it had when you deleted it
 const nothingNew = (c) => { const x = clearedOf(c.id); if (!x) return false; const s = lastSig(c.last); return s === (x.last || '') || (!!x.pend && s === x.pend); };
 const dmHidden = (c) => nothingNew(c) && S.ui.chat !== c.id;
-const unreadIn = (c) => !!(c.last && c.last.by !== S.me.id && c.last.at > (CHAT.reads[c.id] || 0) && !nothingNew(c));
+const unreadIn = (c) => !!(!c.peek && c.last && c.last.by !== S.me.id && c.last.at > (CHAT.reads[c.id] || 0) && !nothingNew(c));
 const unreadCount = () => myChats().filter(unreadIn).length;
 
 /* ── subscriptions ── */

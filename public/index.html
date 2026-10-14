@@ -581,15 +581,13 @@ const deptOf = (id) => cfg().depts.find((d) => d.id === id);
 const isMgmt = (e = S.me) => ['ADMIN', 'HR', 'DIRECTOR'].includes(e?.role);
 const isHR = (e = S.me) => ['ADMIN', 'HR'].includes(e?.role);
 // who may add / change employee records (the server applies the same rule, server/people-rules.js empManageProblem):
-// HR and administrators everyone; Directors everyone but administrators; Managers people in their own department
+// HR, administrators and Directors everyone; Managers people in their own department (not HR / Director / Admin)
 const canAddPeople = () => !!S.me && S.me.active !== false && (isHR() || S.me.role === 'DIRECTOR' || (S.me.role === 'MANAGER' && !!S.me.deptId));
 function canEditEmp(e) {
   if (!S.me || S.me.active === false) return false;
   if (!e) return canAddPeople();
-  if (isHR()) return true;
-  if (e.role === 'ADMIN') return false;
-  if (S.me.role === 'DIRECTOR') return true;
-  return S.me.role === 'MANAGER' && !!S.me.deptId && e.deptId === S.me.deptId && (e.id === S.me.id || !['HR', 'DIRECTOR'].includes(e.role));
+  if (isMgmt()) return true;
+  return S.me.role === 'MANAGER' && !!S.me.deptId && e.deptId === S.me.deptId && (e.id === S.me.id || !['HR', 'DIRECTOR', 'ADMIN'].includes(e.role));
 }
 // who sees other employees' WFH locations (the WFH Live Location Dashboard). The server enforces the same rule
 // (LOCATION_VIEWER_ROLES in server/loc-rules.js) and sends nobody else other people's locations.
@@ -818,10 +816,10 @@ async function createRequest(type, title, data, { amount = null, ctx = {}, empId
 async function decide(r, decision, comment) {
   const steps = r.steps.map((s) => ({ ...s }));
   const i = steps.findIndex((s) => s.status === 'PENDING');
-  if (i < 0 || steps[i].by !== S.me.id) fail('You are not the current approver for this request.');
+  if (i < 0 || (steps[i].by !== S.me.id && S.me.role !== 'ADMIN')) fail('You are not the current approver for this request.');
   if (decision !== 'APPROVED' && !comment.trim()) fail('Write a reason before rejecting or sending back.');
   const now = Date.now();
-  steps[i] = { ...steps[i], status: decision, comment: comment.trim(), done: now };
+  steps[i] = { ...steps[i], status: decision, comment: comment.trim(), done: now, ...(steps[i].by !== S.me.id ? { actedBy: S.me.id } : {}) }; // an administrator deciding for the approver
   let status = r.status;
   if (decision === 'APPROVED') {
     const n = steps.findIndex((s, k) => k > i && s.status === 'WAITING');
@@ -1822,7 +1820,7 @@ const DLABEL = { from: 'From', to: 'To', lt: 'Leave type', days: 'Days', half: '
 function reqDetail(id) {
   const r = S.reqs.find((x) => x.id === id);
   if (!r) return notLoaded('request');
-  const s = curStep(r), canDecide = r.status === 'PENDING' && s?.by === S.me.id, isReq = r.empId === S.me.id || r.raisedBy === S.me.id;
+  const s = curStep(r), canDecide = r.status === 'PENDING' && (s?.by === S.me.id || isAdmin()), isReq = r.empId === S.me.id || r.raisedBy === S.me.id;
   let ctx = '';
   if (!canSee(r.empId) && ['LEAVE', 'CORRECTION'].includes(r.type)) {
     ctx = '<p class="tiny muted">Leave balances, team leave and recorded attendance are visible to the employee’s managers and HR.</p>';
@@ -1843,7 +1841,7 @@ function reqDetail(id) {
     ${isClaim(r) ? '' : `<div class="kv">${r.amount ? `<div><span>Amount</span><b>${money(r.amount)}</b></div>` : ''}${Object.entries(r.data || {}).filter(([k, v]) => DLABEL[k] && v !== '' && v != null && v !== false).map(([k, v]) => `<div><span>${DLABEL[k]}</span><span>${/^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? fmtD(v) : v === true ? 'Yes' : /^https?:/.test(String(v)) ? `<a href="${esc(v)}" target="_blank" rel="noopener">Open link</a>` : esc(v)}</span></div>`).join('')}</div>`}
     ${ctx}
     <div><h3 style="margin-bottom:8px">Approval chain</h3><ol class="timeline"><li class="APPROVED"><b>Submitted</b> by ${esc(nameOf(r.raisedBy || r.empId))} <span class="tiny muted">${fmtDT(r.created)}</span></li>
-      ${r.steps.map((x) => `<li class="${x.status}"><b>${esc(x.label)}</b> — ${esc(nameOf(x.by))} ${pill({ WAITING: ['Not reached', ''], SKIPPED: ['Skipped', ''], ...RSTAT }, x.status)}${x.comment ? `<div class="small" style="font-style:italic">“${esc(x.comment)}”</div>` : ''}<div class="tiny muted">${x.done ? 'Decided ' + fmtDT(x.done) : x.at ? 'Waiting since ' + fmtDT(x.at) : ''}${x.escalated ? ' · escalated' : ''}</div></li>`).join('')}</ol></div>
+      ${r.steps.map((x) => `<li class="${x.status}"><b>${esc(x.label)}</b> — ${esc(nameOf(x.by))}${x.actedBy && x.actedBy !== x.by ? ` <span class="tiny muted">(decided by ${esc(nameOf(x.actedBy))}, administrator)</span>` : ''} ${pill({ WAITING: ['Not reached', ''], SKIPPED: ['Skipped', ''], ...RSTAT }, x.status)}${x.comment ? `<div class="small" style="font-style:italic">“${esc(x.comment)}”</div>` : ''}<div class="tiny muted">${x.done ? 'Decided ' + fmtDT(x.done) : x.at ? 'Waiting since ' + fmtDT(x.at) : ''}${x.escalated ? ' · escalated' : ''}</div></li>`).join('')}</ol></div>
     ${canDecide && !S.readonly ? `<form data-f="decide" data-id="${r.id}" class="grid" style="gap:8px">${isClaim(r) ? claimApprField(r) : ''}<textarea class="i" id="dc-${r.id}" name="comment" rows="2" placeholder="Comment (required to reject or send back)"></textarea><div class="row"><button class="btn pri" name="d" value="APPROVED">Approve</button><button class="btn" name="d" value="RETURNED">Send back</button><button class="btn danger" name="d" value="REJECTED">Reject</button></div></form>` : ''}
     ${isReq && r.status === 'RETURNED' ? `<form data-f="resubmit" data-id="${r.id}" class="row" style="flex-wrap:nowrap"><input class="i" id="rs-${r.id}" name="note" placeholder="What did you change or clarify?" required><button class="btn pri">Resubmit</button></form>` : ''}
     ${isReq && ['PENDING', 'RETURNED'].includes(r.status) ? `<div class="row">${pastSLA(r) && !s?.escalated ? `<button class="btn" data-a="req-escalate" data-id="${r.id}">Escalate to ${esc(nameOf(empById(s.by)?.managerId) || 'their manager')}</button>` : ''}<button class="btn danger" data-a="req-cancel" data-id="${r.id}">Cancel request</button></div>` : ''}
@@ -1902,7 +1900,7 @@ function empForm(id) {
     <label class="f">Designation<input class="i" id="ef-d" name="designation" value="${esc(e?.designation || '')}" ${ro}></label>
     <label class="f">Department<select class="i" id="ef-dp" name="deptId" ${ro}>${mgrOnly ? opts(cfg().depts.filter((d) => d.id === S.me.deptId).map((d) => [d.id, d.name]), S.me.deptId) : deptOpts(e?.deptId, '—')}</select></label>
     <label class="f">Reports to<select class="i" id="ef-m" name="managerId" ${ro}>${peopleOpts(e?.managerId, '—', active().filter((x) => x.id !== e?.id).map((x) => x.id))}</select></label>
-    <label class="f">Role in this app<select class="i" id="ef-r" name="role" ${ro}>${opts([['EMPLOYEE', 'Employee'], ['MANAGER', 'Manager'], ...(mgrOnly && !['HR', 'DIRECTOR'].includes(e?.role) ? [] : [['HR', 'HR'], ['DIRECTOR', 'Director']]), ...(S.me.role === 'ADMIN' || e?.role === 'ADMIN' ? [['ADMIN', 'Administrator']] : [])], e?.role || 'EMPLOYEE')}</select></label>
+    <label class="f">Role in this app<select class="i" id="ef-r" name="role" ${ro}>${opts([['EMPLOYEE', 'Employee'], ['MANAGER', 'Manager'], ...(mgrOnly && !['HR', 'DIRECTOR'].includes(e?.role) ? [] : [['HR', 'HR'], ['DIRECTOR', 'Director']]), ...(isMgmt() || e?.role === 'ADMIN' ? [['ADMIN', 'Administrator']] : [])], e?.role || 'EMPLOYEE')}</select></label>
     ${priv ? `<label class="f">Biometric ID (on the machine)<input class="i" id="ef-b" name="bioId" value="${esc(e?.bioId || '')}" ${ro}></label>` : ''}
     <label class="f">Status<select class="i" id="ef-s" name="status" ${ro}>${opts([['ACTIVE', 'Active'], ['PROBATION', 'Probation'], ['ON_NOTICE', 'On notice'], ['EXITED', 'Exited']], e?.status || 'ACTIVE')}</select></label>
     <label class="f">Joining date<input class="i" id="ef-j" type="date" name="joining" value="${e?.joining || ''}" ${ro}></label>
@@ -1975,7 +1973,10 @@ function myChats() {
   for (const d of cfg().depts) { const id = 'dept-' + d.id; out.push({ id, kind: 'dept', deptId: d.id, name: d.name, ...(CHAT.list.find((c) => c.id === id) || {}) }); }
   // a direct chat you deleted stays hidden until a newer message arrives, or you open it again ("Message a person")
   for (const c of CHAT.list) if ((c.kind === 'group' || c.kind === 'dm') && !c.archived && !(c.kind === 'dm' && dmHidden(c))) out.push(c);
-  return out.filter(inChat).map((c) => ({ ...c, title: chatTitle(c) }));
+  const mine = out.filter(inChat).map((c) => ({ ...c, title: chatTitle(c) }));
+  // administrators also read everyone else's group and direct chats — read only (the server sends them to administrators alone)
+  if (S.me?.role === 'ADMIN') for (const c of CHAT.list) if ((c.kind === 'group' || c.kind === 'dm') && !c.archived && !(c.members || []).includes(S.me.id) && !mine.some((x) => x.id === c.id)) mine.push({ ...c, peek: true, title: c.kind === 'dm' ? (c.members || []).map(nameOf).join(' ↔ ') : c.name });
+  return mine;
 }
 function chatTitle(c) {
   if (c.kind === 'dm') { const other = (c.members || []).find((m) => m !== S.me.id); return nameOf(other); }
@@ -1994,7 +1995,7 @@ function hiddenAt(mark, msgs, i) {
 // true while the chat's latest message is still the one it had when you deleted it
 const nothingNew = (c) => { const x = clearedOf(c.id); if (!x) return false; const s = lastSig(c.last); return s === (x.last || '') || (!!x.pend && s === x.pend); };
 const dmHidden = (c) => nothingNew(c) && S.ui.chat !== c.id;
-const unreadIn = (c) => !!(c.last && c.last.by !== S.me.id && c.last.at > (CHAT.reads[c.id] || 0) && !nothingNew(c));
+const unreadIn = (c) => !!(!c.peek && c.last && c.last.by !== S.me.id && c.last.at > (CHAT.reads[c.id] || 0) && !nothingNew(c));
 const unreadCount = () => myChats().filter(unreadIn).length;
 
 /* ── subscriptions ── */
@@ -3677,7 +3678,7 @@ function vChats2() {
   const side = `<aside class="chat-side ${openId ? 'has-open' : ''}"><div class="chat-side-top"><input class="i" id="ch-q" data-i="chQ" placeholder="Search chats" value="${esc(ui('chQ', ''))}"><button class="btn pri sm" data-a="chat-new" title="New group">+ Group</button></div>
     <div class="dm-pick"><select class="i" id="ch-dm" data-c="chatDM" aria-label="Message a person">${peopleGroups(null, { blank: '✉ Message a person…', exclude: [S.me.id] })}</select></div>
     <div class="chat-list"><button class="chat-item ment ${mentionsView ? 'on' : ''}" data-a="chat-open" data-id="@mentions"><span class="av chav ck-ment">@</span><span class="grow"><b>Mentions</b><span class="tiny muted" style="display:block">Where people tagged you</span></span>${unM ? `<span class="ct">${unM}</span>` : ''}</button>
-      ${group('Starred', list.filter((c) => fav.has(c.id)))}${group('Company', list.filter((c) => c.kind === 'all' && !fav.has(c.id)))}${group('Departments', list.filter((c) => c.kind === 'dept' && !fav.has(c.id)))}${group('Groups', list.filter((c) => c.kind === 'group' && !fav.has(c.id)))}${group('Direct messages', list.filter((c) => c.kind === 'dm' && !fav.has(c.id)))}${list.length ? '' : empty('No chats match.')}
+      ${group('Starred', list.filter((c) => fav.has(c.id) && !c.peek))}${group('Company', list.filter((c) => c.kind === 'all' && !fav.has(c.id)))}${group('Departments', list.filter((c) => c.kind === 'dept' && !fav.has(c.id)))}${group('Groups', list.filter((c) => c.kind === 'group' && !fav.has(c.id) && !c.peek))}${group('Direct messages', list.filter((c) => c.kind === 'dm' && !fav.has(c.id) && !c.peek))}${group('Other people’s chats · administrator', list.filter((c) => c.peek))}${list.length ? '' : empty('No chats match.')}
       <div class="chat-sec">Online now · ${on.size}</div><div class="online-row">${[...on].filter((id) => id !== S.me.id).slice(0, 14).map((id) => `<button class="av-wrap" data-a="dm" data-id="${id}" title="${esc(nameOf(id))} — message">${avatar(nameOf(id))}<span class="ondot"></span></button>`).join('') || '<span class="tiny muted" style="padding:0 14px">Only you right now</span>'}</div></div></aside>`;
   let main = `<section class="chat-main empty-main">${empty('Pick a chat on the left, or message a person from the list.')}</section>`;
   if (mentionsView) {
@@ -3733,9 +3734,9 @@ function vChats2() {
         </div>`;
       }).join('')}</div>`;
     }
-    const canWrite = !S.readonly && (c.kind !== 'all' || isHR() || !c.hrOnly);
+    const canWrite = !S.readonly && !c.peek && (c.kind !== 'all' || isHR() || !c.hrOnly);
     const ed = CH2.editing;
-    main = `<section class="chat-main">
+    main = `<section class="chat-main${c.peek ? ' peek' : ''}">
       <header class="chat-head"><button class="btn ghost sm chat-back" data-a="chat-close" aria-label="Back to chats">‹</button>
         <span class="av-wrap">${c.kind === 'dm' ? avatar(c.title) : `<span class="av chav ck-${c.kind}">${c.kind === 'all' ? '★' : c.kind === 'dept' ? '#' : esc(initials(c.title))}</span>`}${other ? onlineDot(other, on) : ''}</span>
         <div class="grow" style="min-width:0"><b class="trunc" style="display:block">${esc(c.title)}</b><span class="tiny ${typ.length ? 'typing-t' : 'muted'}">${typ.length ? `${esc(typ.join(', '))} ${typ.length > 1 ? 'are' : 'is'} typing…` : c.kind === 'dm' ? `${esc(empById(other)?.designation || '')}${on.has(other) ? ' · <span class="on-t">online</span>' : ''}` : `${members.length} members · ${members.filter((x) => on.has(x)).length} online${c.kind === 'dept' ? ' · department' : c.kind === 'all' ? ' · whole company' : ''}`}</span></div>
@@ -3745,7 +3746,7 @@ function vChats2() {
       </header>
       <div class="tabs chat-tabs">${[['msgs', 'Messages'], ['pins', `Pinned${pins.length ? ` (${pins.length})` : ''}`], ['files', `Files (${msgs.filter((m) => m.file && !m.deleted).length})`], ['members', `Members (${members.length})`]].map(([k, l]) => `<button class="tab" aria-selected="${tab === k}" data-a="ui" data-k="chTab" data-v="${k}">${l}</button>`).join('')}</div>
       ${body}
-      ${tab === 'msgs' && canWrite ? `<form data-f="chat-send" class="composer">
+      ${tab === 'msgs' && c.peek ? '<div class="chat-peek tiny muted">Administrator view — read only. You aren’t a member of this chat.</div>' : ''}${tab === 'msgs' && canWrite ? `<form data-f="chat-send" class="composer">
         ${ed ? `<div class="quote row" style="justify-content:space-between;flex-wrap:nowrap;border-color:var(--c-amber)"><span class="trunc tiny"><b>Editing your message</b> — Enter to save, Esc to cancel</span><button type="button" class="btn ghost sm" data-a="chat-unedit">✕</button></div>` : ''}
         ${CHAT.replyTo ? `<div class="quote row" style="justify-content:space-between;flex-wrap:nowrap"><span class="trunc tiny">Replying to <b>${esc(nameOf(CHAT.replyTo.by))}</b>: ${esc(CHAT.replyTo.text || CHAT.replyTo.file?.name || '')}</span><button type="button" class="btn ghost sm" data-a="chat-unreply">✕</button></div>` : ''}
         ${CHAT.uploading ? `<div class="tiny muted">Uploading ${esc(CHAT.uploading)}…</div>` : ''}
@@ -4108,6 +4109,7 @@ function cmdkRun(it) {
 .msg-sys{text-align:center;font-size:.74rem;color:var(--muted);padding:6px 0}
 .msg-tools{position:absolute;right:14px;top:-14px;display:none;background:var(--surface);border:1px solid var(--line);border-radius:9px;box-shadow:var(--shadow);padding:2px;z-index:2}
 .msg:hover .msg-tools,.msg:focus-within .msg-tools{display:flex}
+.chat-main.peek .msg-tools{display:none!important}.chat-main.peek .rxp{pointer-events:none}.chat-peek{padding:10px 16px;border-top:1px solid var(--line);text-align:center}
 .msg-tools button{border:0;background:none;border-radius:6px;padding:3px 6px;cursor:pointer;font-size:.9rem;color:var(--ink)}
 .msg-tools button:hover{background:var(--sunk)}
 @media (hover:none){.msg-tools{position:static;display:flex;box-shadow:none;border:0;grid-column:2;justify-self:start;margin-top:2px;padding:0}}
@@ -4936,7 +4938,7 @@ function myWorkspace() {
   ensurePayslips();
   const T = today(), m = thisMonth(), sm = monthSummary(S.me, m), bals = balances(S.me, +T.slice(0, 4)).filter((b) => b.lt.quota || b.used);
   const wfh = reqsOf('WFH_OD', S.me.id).filter((r) => r.status !== 'CANCELLED').sort((a, b) => (b.data.from || '').localeCompare(a.data.from || '')).slice(0, 4);
-  const chats = (typeof myChats === 'function' ? myChats() : []).filter((c) => c.last).sort((a, b) => b.last.at - a.last.at).slice(0, 4);
+  const chats = (typeof myChats === 'function' ? myChats() : []).filter((c) => c.last && !c.peek).sort((a, b) => b.last.at - a.last.at).slice(0, 4);
   const slips = myPayslips().slice(0, 4);
   const letters = reqsOf('DOCUMENT', S.me.id).sort((a, b) => b.created - a.created).slice(0, 3);
   const kv = (l, v, c = '') => `<div><span>${l}</span><b class="${c}">${v}</b></div>`;
@@ -5151,6 +5153,7 @@ function vMgmtDash() {
       ${card(`Audit log · ${list.length}`, AUD.sub && !AUD.list.length ? `<div class="body muted small">Loading…</div>` : dataTable('mgA', list, [
         { k: 'at', label: 'When', v: (a) => a.at || 0, html: (a) => `<span class="small">${fmtDT(a.at)}</span>` }, { k: 'by', label: 'By', v: (a) => (a.by ? nameOf(a.by) : 'System') },
         { k: 'action', label: 'Action', v: (a) => a.action || '', html: (a) => `<span class="pill">${esc((a.action || '').replace(/_/g, ' ').toLowerCase())}</span>` }, { k: 'detail', label: 'Details', v: (a) => detail(a), html: (a) => `<span class="small">${esc(detail(a)).slice(0, 300)}</span>` },
+        { k: 'edit', label: '', v: () => '', html: (a) => `<span class="row" style="gap:4px;flex-wrap:nowrap"><button class="btn sm" data-a="rd-aud-edit" data-id="${esc(a.id)}">Edit</button><button class="btn sm danger" data-a="rd-aud-del" data-id="${esc(a.id)}">Delete</button></span>` },
       ], { name: 'Audit log', pageSize: 50, empty: 'No entries match.' }), { list: true })}
       <p class="tiny muted">Recorded by the server for approvals, attendance changed by someone other than the employee, and role / department / manager / status changes; recorded by the app for settings, leave policy, payroll, salary, fines, claims and passwords. Only administrators can read it, and nobody can change or delete it.</p>`;
   }
@@ -5172,7 +5175,24 @@ async function rdAction(a, el) {
     case 'rd-slip': return openModal(() => payslipModal(el.dataset.m));
     case 'rd-slip-print': return window.print();
     case 'rd-settings': S.ui.sTab = el.dataset.v; return setView('settings');
+    // administrators correct or remove audit entries; the server records each change as a new entry
+    case 'rd-aud-edit': return openModal(() => audEditModal(el.dataset.id));
+    case 'rd-aud-save': return act(async () => {
+      const id = el.dataset.id, action = ($('#ae-act')?.value || '').trim().toUpperCase().replace(/\s+/g, '_');
+      let detail; try { detail = JSON.parse($('#ae-det')?.value || '{}'); } catch { fail('Details must be valid JSON, e.g. {"emp": "E1"}.'); }
+      if (!action) fail('Enter the action.');
+      await patch(`audit/${id}`, { action, detail }); closeModal();
+    }, 'Audit entry updated');
+    case 'rd-aud-del': { const id = el.dataset.id; return confirmBox('Delete this audit entry?', 'It is removed from the audit log for everyone. The deletion itself is recorded as a new entry.', () => act(() => S.db.doc(`audit/${id}`).delete(), 'Audit entry deleted')); }
   }
+}
+function audEditModal(id) {
+  const a = AUD.list.find((x) => x.id === id);
+  if (!a) return `${mhead('Edit audit entry')}<div class="body">${empty('This entry no longer exists.')}</div><footer><button class="btn" data-a="close">Close</button></footer>`;
+  return `${mhead('Edit audit entry')}<div class="body grid"><p class="tiny muted">${fmtDT(a.at)} · ${esc(a.by ? nameOf(a.by) : 'System')}. Your change is recorded as a new audit entry.</p>
+    <label class="f">Action<input class="i" id="ae-act" value="${esc(a.action || '')}"></label>
+    <label class="f">Details (JSON)<textarea class="i" id="ae-det" rows="6" style="font-family:monospace">${esc(JSON.stringify(a.detail || {}, null, 2))}</textarea></label></div>
+    <footer><span style="flex:1"></span><button class="btn" data-a="close">Cancel</button><button class="btn pri" data-a="rd-aud-save" data-id="${esc(id)}">Save</button></footer>`;
 }
 // filters change what's on the first page: go back to it
 document.addEventListener('change', (ev) => { const k = ev.target?.dataset?.c; if (k && /^(hr|mg)/.test(k)) for (const id of Object.keys(TBL)) S.ui[id + 'Page'] = 0; });
@@ -5541,8 +5561,8 @@ async function onSubmit(f, form, fd, submitter) {
       if (S.emps.some((e) => e.id !== id && e.code === body.code)) fail(`Employee code ${body.code} is already used.`);
       if (body.bioId && S.emps.some((e) => e.id !== id && e.bioId === body.bioId)) fail(`Biometric ID ${body.bioId} is already on another employee.`);
       if (body.managerId && body.managerId === id) fail('Someone can’t report to themselves.');
-      if (body.role === 'ADMIN' && S.me.role !== 'ADMIN' && empById(id)?.role !== 'ADMIN') fail('Only an administrator can make someone an administrator.');
-      if (id && id === S.me.id && body.role !== S.me.role) fail('You can’t change your own role.');
+      if (body.role === 'ADMIN' && !isMgmt() && empById(id)?.role !== 'ADMIN') fail('Only an administrator, HR or a director can make someone an administrator.');
+      if (id && id === S.me.id && body.role !== S.me.role && S.me.role !== 'ADMIN') fail('You can’t change your own role.');
       if (!isHR() && S.me.role === 'MANAGER') {
         if (body.deptId !== S.me.deptId) fail('People you add or change must be in your own department.');
         if (['HR', 'DIRECTOR', 'ADMIN'].includes(body.role) && body.role !== empById(id)?.role) fail('Managers can only give the Employee or Manager role.');

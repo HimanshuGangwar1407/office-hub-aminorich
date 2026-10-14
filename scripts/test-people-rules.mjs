@@ -155,6 +155,9 @@ test('writes: only the current approver decides — and only their own step', ()
   assert.notEqual(peopleWriteProblem('delete', 'req/r1', undefined, r, E1.s, E1.P), null, 'requests can’t be deleted by the requester');
   const own = { ...r, empId: 'HRP', raisedBy: 'HRP', steps: [{ by: 'DIRP', status: 'PENDING' }] };
   assert.notEqual(peopleWriteProblem('update', 'req/r2', { status: 'APPROVED', steps: [{ by: 'DIRP', status: 'APPROVED' }] }, own, HR.s, HR.P), null, 'HR can’t approve their own request');
+  const ownA = { ...r, empId: 'ADM', raisedBy: 'ADM', steps: [{ by: 'DIRP', status: 'PENDING' }] };
+  assert.equal(peopleWriteProblem('update', 'req/r3', { status: 'APPROVED', steps: [{ by: 'DIRP', status: 'APPROVED', actedBy: 'ADM' }] }, ownA, ADM.s, ADM.P), null, 'administrators approve their own requests');
+  assert.equal(peopleWriteProblem('update', 'req/r1', approve, r, ADM.s, ADM.P), null, 'and decide anyone’s step');
 });
 
 test('writes: the requester cancels, resubmits after a send-back, or escalates', () => {
@@ -216,10 +219,16 @@ test('writes: the audit log is append-only and in your own name; codes come from
   assert.equal(peopleWriteProblem('set', 'audit/a1', { by: 'E1', action: 'X' }, null, E1.s, E1.P), null);
   assert.notEqual(peopleWriteProblem('set', 'audit/a1', { by: 'MGR', action: 'X' }, null, E1.s, E1.P), null);
   assert.notEqual(peopleWriteProblem('set', 'audit/a1', { action: 'X' }, null, E1.s, E1.P), null, 'no anonymous “system” entries from the browser');
-  for (const w of [E1, ADM]) {
+  for (const w of [E1, HR, DIR]) {
     assert.notEqual(peopleWriteProblem('update', 'audit/a1', { action: 'Y' }, { by: 'E1' }, w.s, w.P), null, w.s.empId);
     assert.notEqual(peopleWriteProblem('delete', 'audit/a1', undefined, { by: 'E1' }, w.s, w.P), null, w.s.empId);
   }
+  assert.equal(peopleWriteProblem('update', 'audit/a1', { action: 'Y' }, { by: 'E1' }, ADM.s, ADM.P), null, 'administrators correct entries');
+  assert.equal(peopleWriteProblem('delete', 'audit/a1', undefined, { by: 'E1' }, ADM.s, ADM.P), null, 'and remove them');
+  assert.notEqual(peopleWriteProblem('set', 'audit/a2', { by: 'E1', action: 'X' }, null, ADM.s, ADM.P), null, 'new entries are still in your own name');
+  assert.deepEqual(auditEntry('delete', 'audit/a1', undefined, { by: 'E1', action: 'X' }, ADM.s, 9), { at: 9, by: 'ADM', action: 'AUDIT_ENTRY_DELETED', detail: { entry: 'a1', action: 'X' } });
+  assert.equal(auditEntry('update', 'audit/a1', { action: 'Y' }, { by: 'E1', action: 'X' }, ADM.s, 9).action, 'AUDIT_ENTRY_EDITED');
+  assert.equal(auditEntry('set', 'audit/a3', { by: 'ADM', action: 'X' }, null, ADM.s), null, 'ordinary new entries are not doubled');
   assert.notEqual(peopleWriteProblem('set', 'seq/REQ', { n: 1 }, null, ADM.s, ADM.P), null);
   assert.notEqual(peopleWriteProblem('set', 'att/E1_2026-10', att('E1'), null, GONE.s, GONE.P), null, 'inactive accounts');
   assert.equal(peopleWriteProblem('set', 'emp/E1', {}, null, E1.s, E1.P), undefined);
@@ -249,12 +258,16 @@ test('HR, directors and managers (own department) add and change employees; admi
   assert.equal(mp(DIR, 'update', 'HRP', { designation: 'Lead' }, hrp), null);
   assert.equal(mp(MGR, 'update', 'E1', { role: 'MANAGER', managerId: 'MGR' }, e1), null, 'managers promote within their department');
   assert.equal(mp(MGR, 'update', 'MGR', { designation: 'Sales lead' }, { deptId: 'sales', role: 'MANAGER' }), null, 'own record');
-  for (const w of [HR, DIR, MGR]) {
-    assert.match(mp(w, 'update', 'E1', { role: 'ADMIN' }, e1), /administrator/, 'grant admin ' + w.s.role);
-    assert.match(mp(w, 'update', 'ADM', { role: 'HR' }, adm), /administrator/, 'remove admin ' + w.s.role);
+  for (const w of [ADM, HR, DIR]) {
+    assert.equal(mp(w, 'update', 'E1', { role: 'ADMIN' }, e1), null, 'grant admin ' + w.s.role);
+    assert.equal(mp(w, 'set', 'N5', { name: 'x', deptId: 'ops', role: 'ADMIN' }, null), null, 'add an admin ' + w.s.role);
+    assert.equal(mp(w, 'update', 'ADM2', { role: 'HR' }, adm), null, 'remove admin ' + w.s.role);
   }
-  assert.equal(mp(ADM, 'update', 'E1', { role: 'ADMIN' }, e1), null);
-  assert.match(mp(DIR, 'update', 'ADM', { designation: 'x' }, adm), /administrator/);
+  assert.equal(mp(DIR, 'update', 'ADM2', { designation: 'x' }, adm), null, 'directors edit administrator records');
+  assert.match(mp(MGR, 'update', 'E1', { role: 'ADMIN' }, e1), /administrator|Employee or Manager/, 'managers never give admin');
+  assert.match(mp(MGR, 'update', 'ADM2', { designation: 'x' }, { ...adm, deptId: 'sales' }), /Only HR/, 'managers never edit admins');
+  assert.equal(mp(ADM, 'update', 'ADM', { role: 'HR' }, adm), null, 'administrators may change their own role');
+  assert.match(mp(DIR, 'update', 'DIRP', { role: 'ADMIN' }, { deptId: 'ops', role: 'DIRECTOR' }), /own role/, 'others may not — not even to administrator');
   assert.match(mp(HR, 'update', 'HRP', { role: 'DIRECTOR' }, { deptId: 'ops', role: 'HR' }), /own role/);
   assert.match(mp(MGR, 'update', 'MGR', { role: 'DIRECTOR' }, { deptId: 'sales', role: 'MANAGER' }), /own role/);
   assert.match(mp(DIR, 'delete', 'E1', undefined, e1), /Only HR/);
