@@ -67,7 +67,7 @@ function myWorkspace() {
   ensurePayslips();
   const T = today(), m = thisMonth(), sm = monthSummary(S.me, m), bals = balances(S.me, +T.slice(0, 4)).filter((b) => b.lt.quota || b.used);
   const wfh = reqsOf('WFH_OD', S.me.id).filter((r) => r.status !== 'CANCELLED').sort((a, b) => (b.data.from || '').localeCompare(a.data.from || '')).slice(0, 4);
-  const chats = (typeof myChats === 'function' ? myChats() : []).filter((c) => c.last).sort((a, b) => b.last.at - a.last.at).slice(0, 4);
+  const chats = (typeof myChats === 'function' ? myChats() : []).filter((c) => c.last && !c.peek).sort((a, b) => b.last.at - a.last.at).slice(0, 4);
   const slips = myPayslips().slice(0, 4);
   const letters = reqsOf('DOCUMENT', S.me.id).sort((a, b) => b.created - a.created).slice(0, 3);
   const kv = (l, v, c = '') => `<div><span>${l}</span><b class="${c}">${v}</b></div>`;
@@ -282,6 +282,7 @@ function vMgmtDash() {
       ${card(`Audit log · ${list.length}`, AUD.sub && !AUD.list.length ? `<div class="body muted small">Loading…</div>` : dataTable('mgA', list, [
         { k: 'at', label: 'When', v: (a) => a.at || 0, html: (a) => `<span class="small">${fmtDT(a.at)}</span>` }, { k: 'by', label: 'By', v: (a) => (a.by ? nameOf(a.by) : 'System') },
         { k: 'action', label: 'Action', v: (a) => a.action || '', html: (a) => `<span class="pill">${esc((a.action || '').replace(/_/g, ' ').toLowerCase())}</span>` }, { k: 'detail', label: 'Details', v: (a) => detail(a), html: (a) => `<span class="small">${esc(detail(a)).slice(0, 300)}</span>` },
+        { k: 'edit', label: '', v: () => '', html: (a) => `<span class="row" style="gap:4px;flex-wrap:nowrap"><button class="btn sm" data-a="rd-aud-edit" data-id="${esc(a.id)}">Edit</button><button class="btn sm danger" data-a="rd-aud-del" data-id="${esc(a.id)}">Delete</button></span>` },
       ], { name: 'Audit log', pageSize: 50, empty: 'No entries match.' }), { list: true })}
       <p class="tiny muted">Recorded by the server for approvals, attendance changed by someone other than the employee, and role / department / manager / status changes; recorded by the app for settings, leave policy, payroll, salary, fines, claims and passwords. Only administrators can read it, and nobody can change or delete it.</p>`;
   }
@@ -303,7 +304,24 @@ async function rdAction(a, el) {
     case 'rd-slip': return openModal(() => payslipModal(el.dataset.m));
     case 'rd-slip-print': return window.print();
     case 'rd-settings': S.ui.sTab = el.dataset.v; return setView('settings');
+    // administrators correct or remove audit entries; the server records each change as a new entry
+    case 'rd-aud-edit': return openModal(() => audEditModal(el.dataset.id));
+    case 'rd-aud-save': return act(async () => {
+      const id = el.dataset.id, action = ($('#ae-act')?.value || '').trim().toUpperCase().replace(/\s+/g, '_');
+      let detail; try { detail = JSON.parse($('#ae-det')?.value || '{}'); } catch { fail('Details must be valid JSON, e.g. {"emp": "E1"}.'); }
+      if (!action) fail('Enter the action.');
+      await patch(`audit/${id}`, { action, detail }); closeModal();
+    }, 'Audit entry updated');
+    case 'rd-aud-del': { const id = el.dataset.id; return confirmBox('Delete this audit entry?', 'It is removed from the audit log for everyone. The deletion itself is recorded as a new entry.', () => act(() => S.db.doc(`audit/${id}`).delete(), 'Audit entry deleted')); }
   }
+}
+function audEditModal(id) {
+  const a = AUD.list.find((x) => x.id === id);
+  if (!a) return `${mhead('Edit audit entry')}<div class="body">${empty('This entry no longer exists.')}</div><footer><button class="btn" data-a="close">Close</button></footer>`;
+  return `${mhead('Edit audit entry')}<div class="body grid"><p class="tiny muted">${fmtDT(a.at)} · ${esc(a.by ? nameOf(a.by) : 'System')}. Your change is recorded as a new audit entry.</p>
+    <label class="f">Action<input class="i" id="ae-act" value="${esc(a.action || '')}"></label>
+    <label class="f">Details (JSON)<textarea class="i" id="ae-det" rows="6" style="font-family:monospace">${esc(JSON.stringify(a.detail || {}, null, 2))}</textarea></label></div>
+    <footer><span style="flex:1"></span><button class="btn" data-a="close">Cancel</button><button class="btn pri" data-a="rd-aud-save" data-id="${esc(id)}">Save</button></footer>`;
 }
 // filters change what's on the first page: go back to it
 document.addEventListener('change', (ev) => { const k = ev.target?.dataset?.c; if (k && /^(hr|mg)/.test(k)) for (const id of Object.keys(TBL)) S.ui[id + 'Page'] = 0; });

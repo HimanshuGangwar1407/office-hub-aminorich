@@ -348,8 +348,8 @@ async function onSubmit(f, form, fd, submitter) {
       if (S.emps.some((e) => e.id !== id && e.code === body.code)) fail(`Employee code ${body.code} is already used.`);
       if (body.bioId && S.emps.some((e) => e.id !== id && e.bioId === body.bioId)) fail(`Biometric ID ${body.bioId} is already on another employee.`);
       if (body.managerId && body.managerId === id) fail('Someone can’t report to themselves.');
-      if (body.role === 'ADMIN' && S.me.role !== 'ADMIN' && empById(id)?.role !== 'ADMIN') fail('Only an administrator can make someone an administrator.');
-      if (id && id === S.me.id && body.role !== S.me.role) fail('You can’t change your own role.');
+      if (body.role === 'ADMIN' && !isMgmt() && empById(id)?.role !== 'ADMIN') fail('Only an administrator, HR or a director can make someone an administrator.');
+      if (id && id === S.me.id && body.role !== S.me.role && S.me.role !== 'ADMIN') fail('You can’t change your own role.');
       if (!isHR() && S.me.role === 'MANAGER') {
         if (body.deptId !== S.me.deptId) fail('People you add or change must be in your own department.');
         if (['HR', 'DIRECTOR', 'ADMIN'].includes(body.role) && body.role !== empById(id)?.role) fail('Managers can only give the Employee or Manager role.');

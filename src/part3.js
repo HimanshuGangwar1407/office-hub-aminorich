@@ -73,10 +73,10 @@ async function createRequest(type, title, data, { amount = null, ctx = {}, empId
 async function decide(r, decision, comment) {
   const steps = r.steps.map((s) => ({ ...s }));
   const i = steps.findIndex((s) => s.status === 'PENDING');
-  if (i < 0 || steps[i].by !== S.me.id) fail('You are not the current approver for this request.');
+  if (i < 0 || (steps[i].by !== S.me.id && S.me.role !== 'ADMIN')) fail('You are not the current approver for this request.');
   if (decision !== 'APPROVED' && !comment.trim()) fail('Write a reason before rejecting or sending back.');
   const now = Date.now();
-  steps[i] = { ...steps[i], status: decision, comment: comment.trim(), done: now };
+  steps[i] = { ...steps[i], status: decision, comment: comment.trim(), done: now, ...(steps[i].by !== S.me.id ? { actedBy: S.me.id } : {}) }; // an administrator deciding for the approver
   let status = r.status;
   if (decision === 'APPROVED') {
     const n = steps.findIndex((s, k) => k > i && s.status === 'WAITING');

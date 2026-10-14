@@ -58,15 +58,13 @@ const deptOf = (id) => cfg().depts.find((d) => d.id === id);
 const isMgmt = (e = S.me) => ['ADMIN', 'HR', 'DIRECTOR'].includes(e?.role);
 const isHR = (e = S.me) => ['ADMIN', 'HR'].includes(e?.role);
 // who may add / change employee records (the server applies the same rule, server/people-rules.js empManageProblem):
-// HR and administrators everyone; Directors everyone but administrators; Managers people in their own department
+// HR, administrators and Directors everyone; Managers people in their own department (not HR / Director / Admin)
 const canAddPeople = () => !!S.me && S.me.active !== false && (isHR() || S.me.role === 'DIRECTOR' || (S.me.role === 'MANAGER' && !!S.me.deptId));
 function canEditEmp(e) {
   if (!S.me || S.me.active === false) return false;
   if (!e) return canAddPeople();
-  if (isHR()) return true;
-  if (e.role === 'ADMIN') return false;
-  if (S.me.role === 'DIRECTOR') return true;
-  return S.me.role === 'MANAGER' && !!S.me.deptId && e.deptId === S.me.deptId && (e.id === S.me.id || !['HR', 'DIRECTOR'].includes(e.role));
+  if (isMgmt()) return true;
+  return S.me.role === 'MANAGER' && !!S.me.deptId && e.deptId === S.me.deptId && (e.id === S.me.id || !['HR', 'DIRECTOR', 'ADMIN'].includes(e.role));
 }
 // who sees other employees' WFH locations (the WFH Live Location Dashboard). The server enforces the same rule
 // (LOCATION_VIEWER_ROLES in server/loc-rules.js) and sends nobody else other people's locations.
