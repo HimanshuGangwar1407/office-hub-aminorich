@@ -221,7 +221,7 @@ function quarterOpts(sel) { const out = []; let y = +today().slice(0, 4), q = Ma
 function vMgmtDash() {
   if (!canMgmtDash()) return shell(empty('The management dashboard is for administrators and directors.'), 'Management');
   const admin = isAdmin(), tab = ui('mgTab', 'overview'), T = today();
-  const tabs = [['overview', 'Company overview'], ['depts', 'Departments'], ['reports', 'Business reports'], ...(admin ? [['users', 'Users & roles'], ['audit', 'Audit log'], ['config', 'Configuration']] : [])];
+  const tabs = [['overview', 'Company overview'], ['depts', 'Departments'], ['reports', 'Business reports'], ...(typeof erpHas === 'function' && (erpHas('fin') || erpHas('acc')) ? [['fin', 'Finance & purchase']] : []), ...(admin ? [['users', 'Users & roles'], ['audit', 'Audit log'], ['config', 'Configuration']] : [])];
   const head = `<div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button class="tab" role="tab" aria-selected="${tab === k}" data-a="ui" data-k="mgTab" data-v="${k}">${l}</button>`).join('')}</div>`;
   let body = '';
   if (tab === 'overview') {
@@ -291,6 +291,7 @@ function vMgmtDash() {
     const item = (k, l, d) => `<li data-a="rd-settings" data-v="${k}" style="cursor:pointer"><span class="grow"><b class="small">${l}</b><span class="tiny muted" style="display:block">${d}</span></span><span class="tiny muted">Open ›</span></li>`;
     body = card('Configuration', `<ul class="list">${item('depts', 'Departments & heads', `${C.depts.length} department(s)`)}${item('calendar', 'Shift, weekly off & holidays', `Shift ${esc(C.shift.start)}–${esc(C.shift.end)} · ${C.holidays.length} holiday(s)`)}${item('leave', 'Leave policy', `${C.leaveTypes.length} leave type(s)`)}${item('general', 'Attendance & approvals', `Source: ${C.attSource === 'device' ? 'machine import' : 'web check-in'} · response time ${+C.slaHours || 24} h`)}${item('ann', 'Announcements', `${(C.announcements || []).length} posted`)}${item('access', 'Window access by role', 'Who sees which part of the app')}</ul>`, { list: true });
   }
+  if (tab === 'fin' && typeof mgmtFin === 'function') body = mgmtFin(); // part25 — computed on the server
   return shell(`${head}${body}`, 'Management', admin ? 'Company overview, departments, reports and administration' : 'Company overview, departments and reports');
 }
 

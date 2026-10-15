@@ -1,6 +1,6 @@
 <script>
 /* ═════════════ Render loop ═════════════ */
-const VIEW_FN = { dashboard: vDashboard, policies: vPolicies, chats: vChats2, attendance: vAttendance, wfhlive: vWfhLive, leave: vLeave, tasks: vTasks, worklog: vWorklog, approvals: vApprovals, claims: vClaims, complaints: vComplaints, deptdash: vDeptDash, hrdash: vHrDash, mgmtdash: vMgmtDash, departments: vDepartments, people: vPeople, reports: vReports, settings: vSettings };
+const VIEW_FN = { dashboard: vDashboard, policies: vPolicies, chats: vChats2, attendance: vAttendance, wfhlive: vWfhLive, leave: vLeave, tasks: vTasks, worklog: vWorklog, approvals: vApprovals, claims: vClaims, complaints: vComplaints, deptdash: vDeptDash, hrdash: vHrDash, mgmtdash: vMgmtDash, departments: vDepartments, people: vPeople, reports: vReports, settings: vSettings, accounts: vAccounts, purchase: vPurchase, stores: vStores, erpsetup: vErpSetup };
 let raf = 0, viewChanged = true;
 function schedule() { if (!raf) raf = requestAnimationFrame(() => { raf = 0; render(); }); }
 function morph(root, html, fresh = false) {
@@ -83,7 +83,7 @@ async function onAction(a, el, ev) {
     case 'ntf-open': {
       const n = byId(S.ntf, id);
       if (n && !n.read) act(() => patch(`ntf/${n.id}`, { read: true }));
-      if (n?.go) { closeModal(); if (n.go.view) setView(n.go.view); if (n.go.chat) { S.ui.chat = n.go.chat; S.ui.chTab = 'msgs'; S.ui.chFind = ''; schedule(); if (n.go.msg && typeof chatAction2 === 'function') setTimeout(() => chatAction2('chat-jump', { dataset: { m: n.go.msg } }), 400); } if (n.go.task) openModal(() => taskDetail(n.go.task)); if (n.go.req) openModal(() => reqDetail(n.go.req)); if (n.go.dreq) openModal(() => dreqDetail(n.go.dreq)); }
+      if (n?.go) { closeModal(); if (n.go.erp) { S.ui.erpOpen = n.go.erp; S.ui.erpKind = n.go.erpKind || 'pay'; } if (n.go.view) setView(n.go.view); if (n.go.chat) { S.ui.chat = n.go.chat; S.ui.chTab = 'msgs'; S.ui.chFind = ''; schedule(); if (n.go.msg && typeof chatAction2 === 'function') setTimeout(() => chatAction2('chat-jump', { dataset: { m: n.go.msg } }), 400); } if (n.go.task) openModal(() => taskDetail(n.go.task)); if (n.go.req) openModal(() => reqDetail(n.go.req)); if (n.go.dreq) openModal(() => dreqDetail(n.go.dreq)); }
       return;
     }
     case 'ntf-readall': return act(async () => { for (const n of S.ntf.filter((x) => !x.read)) await patch(`ntf/${n.id}`, { read: true }); }, 'All marked read');
@@ -126,7 +126,7 @@ async function onAction(a, el, ev) {
     case 'export-tasks': return exportXlsx('Tasks', ['Code', 'Title', 'Assignee', 'Assigned by', 'Priority', 'Status', 'Overdue', 'Start', 'Due', 'Project', 'Hours', 'Completed'], S.tasks.filter((t) => isMgmt() || canSee(t.assigneeId) || t.assignerId === S.me.id).sort(taskSort).map((t) => [t.code, t.title, nameOf(t.assigneeId), nameOf(t.assignerId), t.priority, TSTAT[effStatus(t)][0], overdue(t) ? 'Yes' : '', t.start, t.due, t.project || '', t.hours || 0, t.completedAt ? fmtDT(t.completedAt) : '']));
     case 'export-people': return exportXlsx('Employees', ['Code', 'Name', 'Email', 'Phone', 'Department', 'Designation', 'Reports to', 'Role', 'Status', 'Joining', 'Biometric ID'], S.emps.filter((e) => isMgmt() || canSee(e.id)).map((e) => [e.code, e.name, e.email || '', e.phone || '', deptOf(e.deptId)?.name || '', e.designation || '', e.managerId ? nameOf(e.managerId) : '', e.role, e.status || 'ACTIVE', e.joining || '', e.bioId || '']));
     case 'export-att-day': { const d = ui('attDate', today()); return exportXlsx(`Attendance ${d}`, ['Code', 'Name', 'Department', 'Status', 'In', 'Out', 'Worked (h)', 'Late (min)', 'Location', 'Notes'], scope().map(empById).filter(Boolean).map((e) => { const s = dayStatus(e, d); return [e.code, e.name, deptOf(e.deptId)?.name || '', STATUS[s.code]?.[0] || '', hm(s.inT), hm(s.outT), round2(s.work / 60), s.lateMin || '', locText(e.id, d), s.note]; })); }
-    default: if (a === 'cmdk-open') return openCmdk(); if (a === 'cmdk-go') return cmdkRun(cmdkItems()[+el.dataset.i || 0]); if (a.startsWith('pol-')) return polAction(a, el, ev); if (a.startsWith('dd-')) return ddAction(a, el, ev); if (a.startsWith('rd-')) return rdAction(a, el, ev); if (a.startsWith('cmp-')) return cmpAction(a, el, ev); if (a.startsWith('chat-') || a.startsWith('cmdk-')) return chatAction2(a, el, ev); if (a.startsWith('loc-')) return locAction(a, el, ev); if (a.startsWith('pay-')) return payAction(a, el, ev); if (a.startsWith('claim-') || a.startsWith('cl-')) return claimAction(a, el, ev);
+    default: if (a === 'cmdk-open') return openCmdk(); if (a === 'cmdk-go') return cmdkRun(cmdkItems()[+el.dataset.i || 0]); if (a.startsWith('pol-')) return polAction(a, el, ev); if (a.startsWith('dd-')) return ddAction(a, el, ev); if (a.startsWith('rd-')) return rdAction(a, el, ev); if (a.startsWith('erp-')) return erpAction(a, el, ev); if (a.startsWith('cmp-')) return cmpAction(a, el, ev); if (a.startsWith('chat-') || a.startsWith('cmdk-')) return chatAction2(a, el, ev); if (a.startsWith('loc-')) return locAction(a, el, ev); if (a.startsWith('pay-')) return payAction(a, el, ev); if (a.startsWith('claim-') || a.startsWith('cl-')) return claimAction(a, el, ev);
       if (a === 'acct') { S.ui.moreOpen = ''; return openModal(accountModal); }
       if (a === 'acct-signout') { await stopLive(true, true).catch(() => {}); return signOut(); }
       if (a === 'acct-reset') { const e = empById(id); return confirmBox(`Reset ${e.name}’s password?`, 'They will be signed out and asked to create a new password the next time they open OfficeHub.', async () => { if (!e.userId) fail('This employee has no account yet.'); if (S.canEdit === false) fail('You need Editor access to the app to reset passwords.'); await S.db.doc(`auth/${e.userId}`).delete(); await audit('PASSWORD_RESET', { emp: e.id }); await notify([e.id], { title: 'Your OfficeHub password was reset', body: `Reset by ${S.me.name}. Open OfficeHub to create a new one.` }); }, { danger: true }); }
@@ -146,6 +146,7 @@ const saveCfg = (partial) => put('cfg/main', { ...strip(cfg()), ...partial });
 async function onSubmit(f, form, fd, submitter) {
   const v = (k) => String(fd.get(k) ?? '').trim();
   const id = form.dataset.id;
+  if (f.startsWith('erp-')) return erpSubmit(f, form, fd, submitter);
   switch (f) {
     case 'confirm': { const fn = M?.onConfirm; return act(async () => { await fn(v('v')); closeModal(); }, 'Done'); }
     case 'setup': return act(async () => {

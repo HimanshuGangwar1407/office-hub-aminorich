@@ -17,6 +17,7 @@ import { isGroupAdmin } from './chat-rules.js';
 import { canReadComplaint, isComplaintStaffCtx } from './complaints.js';
 import { isPolicyManager, policyVisible } from './policy.js';
 import { peopleAccess, peopleReadable, shapeEmp, shapePayroll, shapeReq } from './people-rules.js';
+import { erpPerms, erpReadable, isErpCollection } from './erp-perms.js';
 
 const MGMT = ['ADMIN', 'HR', 'DIRECTOR'];
 const SELF_EDITABLE = new Set(['prefs', 'wfhLoc']);
@@ -70,8 +71,10 @@ export function accessFor(s, ctx) {
   // reloads its copy so it gets the older records it may now see, and drops the ones it may no longer see
   const P = peopleAccess(s, ctx);
   const ppl = `${P.mgmt ? 'M' : 't' + hash([...P.team].sort().join(',')) + '.h' + hash([...P.headOf].sort().join(','))}${P.accounts ? 'A' : ''}${P.salary ? 'S' : ''}`;
-  const sig = `${all ? 'all' : 'own'}.c${hash([...new Set(shared)].sort().join(','))}.k${complaintStaff ? 1 : 0}${s?.admin ? 'A' : ''}.p${hash(visiblePolicies.join(','))}.w${ppl}`;
-  return { s, ctx, active, all, mgmt, chatOk, chatReadOk, seesEmpLoc, complaintStaff, policyMgr, P, sig };
+  // Accounts / Purchase / Stores permissions (server/erp-perms.js): when they change, the browser reloads its copy
+  const erp = erpPerms(s, ctx);
+  const sig = `${all ? 'all' : 'own'}.c${hash([...new Set(shared)].sort().join(','))}.k${complaintStaff ? 1 : 0}${s?.admin ? 'A' : ''}.p${hash(visiblePolicies.join(','))}.w${ppl}${erp.size ? '.e' + hash([...erp].sort().join(',')) : ''}`;
+  return { s, ctx, active, all, mgmt, chatOk, chatReadOk, seesEmpLoc, complaintStaff, policyMgr, P, erp, sig };
 }
 
 /** Can this record be sent to the session? `data` is null for deleted records. (Files are checked separately.) */
@@ -91,6 +94,7 @@ export function canReadDoc(path, data, A) {
   if (c === 'complaint' || c === 'complaintsecret' || c === 'complaintfile') return canReadComplaint(path, data, s, A.complaintStaff);
   if (c === 'policy') return policyVisible(data, s, A.ctx, A.policyMgr);
   if (c === 'policyfile') return false; // read only through a policy the reader may see (app.js)
+  if (isErpCollection(c)) return erpReadable(path, data, s, A.erp || new Set());
   const pr = peopleReadable(path, data, s, A.P, A.all);
   if (pr !== undefined) return pr;
   return true;
@@ -180,6 +184,8 @@ export function refUsesFile(path, data, fid, by) {
   if (!data || !by || !fid) return false;
   if (/^loc\/[^/]+$/.test(path)) return data.empId === by && (data.pings || []).some((p) => p?.photo?.fid === fid);
   if (/^chat\/[^/]+\/b\/[^/]+$/.test(path)) return data.by === by && (data.msgs || []).some((m) => m?.file?.fid === fid);
+  // supporting documents on finance, purchase and stores records (the server checked the uploader when attaching them)
+  if (/^erp_[a-z]+\/[^/]+$/.test(path)) return [data.files, ...(data.payments || []).map((x) => x?.files), ...(data.received || []).map((x) => x?.files)].some((l) => (l || []).some((f) => f?.fid === fid && f.by === by));
   return false;
 }
 

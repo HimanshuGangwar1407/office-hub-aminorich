@@ -1,5 +1,5 @@
 // All OfficeHub API routes. Used by api/main.js on Vercel and by scripts/dev-server.mjs locally.
-import { q, getPool, ensureSchema, writeDoc, getDoc, parentOf } from './db.js';
+import { q, getPool, ensureSchema, writeDoc, getDoc, parentOf, withTx } from './db.js';
 import { sessionFrom, hashPassword, checkPassword, passwordProblem, newUid, makeToken, cookieHeader, safeEqual } from './auth.js';
 import { chatWriteProblem, clearedChatsProblem } from './chat-rules.js';
 import { locWriteProblem, LIVE_STOPPED, LIVE_EXPIRED } from './loc-rules.js';
@@ -7,6 +7,8 @@ import { buildCtx, accessFor, canReadDoc, shapeDoc, empWriteProblem, chatAccessP
 import { peopleWriteProblem, auditEntry, empManageProblem } from './people-rules.js';
 import { isAssignableCtx, complaintWriteProblem, buildComplaint } from './complaints.js';
 import { policyWriteProblem, policyFileWriteProblem, policyVisible, isPolicyManager } from './policy.js';
+import { runErp } from './erp-all.js';
+import { isErpCollection } from './erp-perms.js';
 
 const SALARY = new Set(['pay', 'payroll', 'fines']);
 // managerId and deptId decide who may see someone's WFH locations (server/loc-rules.js), so only HR may change them
@@ -49,7 +51,7 @@ async function blobRefs(fid, by) {
   if (!/^[A-Za-z0-9]{4,64}$/.test(fid) || !by) return [];
   const key = `${fid}|${by}`, hit = refCache.get(key);
   if (hit && hit.at > Date.now() - 30000) return hit.paths;
-  const rows = (await q(`SELECT path, data FROM docs WHERE NOT deleted AND ((parent = 'loc' AND data->>'empId' = $2) OR (parent LIKE 'chat/%/b' AND data->>'by' = $2)) AND data::text LIKE $1 LIMIT 50`, [`%"${fid}"%`, by])).rows;
+  const rows = (await q(`SELECT path, data FROM docs WHERE NOT deleted AND ((parent = 'loc' AND data->>'empId' = $2) OR (parent LIKE 'chat/%/b' AND data->>'by' = $2) OR parent LIKE 'erp\_%') AND data::text LIKE $1 LIMIT 50`, [`%"${fid}"%`, by])).rows;
   const paths = rows.filter((r) => refUsesFile(r.path, r.data, fid, by)).map((r) => r.path);
   if (refCache.size > 5000) refCache.clear();
   refCache.set(key, { at: Date.now(), paths });
@@ -61,6 +63,8 @@ async function checkWrite(op, path, data, old, s, A) {
   const no = (m) => fail(403, 'permission_denied', m || 'You don’t have permission to change this.');
   if (!s.active) no('Your account is not active. Ask HR.');
   if (c === 'auth') no();
+  // Accounts, Purchase and Stores records change only through POST /api/erp (server/erp.js), one checked transaction each
+  if (isErpCollection(c)) no('Finance, purchase and stores records change only through their own screens.');
   if (['att', 'wlog', 'task', 'req', 'audit', 'seq'].includes(c)) {
     const X = {};
     if (c === 'req' && !old && ['REVIEW', 'EXTENSION'].includes(data?.type) && typeof data?.data?.taskId === 'string') X.task = (await getDoc(`task/${data.data.taskId}`))?.data || null;
@@ -97,6 +101,8 @@ async function checkWrite(op, path, data, old, s, A) {
     const next = op === 'update' ? { ...(old || {}), ...data } : op === 'set' ? data : null;
     // userId links an employee to a login. Only the server sets it — except the owner's own record during first-time setup.
     if (next && (next.userId || '') !== (old?.userId || '') && !(s.bootstrap && !old && next.userId === s.uid)) no('Logins are linked when the employee creates their account.');
+    // finance permissions are granted on the Finance setup page by an administrator (POST /api/erp perm.set, audited)
+    for (const k of ['erp', 'erpLimits']) if (JSON.stringify(next?.[k] ?? null) !== JSON.stringify(old?.[k] ?? null)) no('Finance, purchase and stores permissions are changed on the Finance setup page.');
     // HR, administrators, Directors and Managers (their own department) add and change employees — server/people-rules.js
     const m = empManageProblem(op, a, data, old, s, A.P, A.ctx);
     if (m) no(m);
@@ -321,6 +327,22 @@ const routes = {
       ON CONFLICT (path) DO UPDATE SET data = jsonb_build_object('n', GREATEST((docs.data->>'n')::int, $2::int) + 1), v = nextval('docs_v'), at = now() RETURNING (data->>'n')::int AS n`, [`seq/${name}`, used]);
     const n = Number(r.rows[0].n);
     return { n, code: `${name}-${String(n).padStart(4, '0')}` };
+  },
+  // Accounts, Purchase and Stores: one command per call, checked and applied in one transaction (server/erp.js)
+  'POST erp': async (req) => {
+    const s = await needSession(req);
+    const cmd = String(req.body?.cmd || '');
+    if (!/^[a-z]+(\.[a-zA-Z]+)+$/.test(cmd)) fail(400, 'invalid_argument', 'Unknown action.');
+    const A = await accessOf(s);
+    return withTx((t) => runErp(cmd, req.body?.args, s, A.ctx, t));
+  },
+  // EMI reminders and overdue flags on a schedule (optional: Vercel Cron with CRON_SECRET). The same check also runs
+  // whenever Accounts opens the app, so reminders work without it. Each reminder is sent once (server/erp-loans.js).
+  'GET cron/erp': async (req) => {
+    const secret = process.env.CRON_SECRET;
+    if (!secret || !safeEqual(String(req.headers.authorization || ''), `Bearer ${secret}`)) fail(404, 'not_found', 'No such API route.');
+    const A = await accessOf({ system: true, active: true, empId: null, role: 'SYSTEM' });
+    return withTx((t) => runErp('erp.tick', {}, { system: true, active: true, empId: null, role: 'SYSTEM' }, A.ctx, t));
   },
   'POST lease': async (req) => {
     const s = await needSession(req);
